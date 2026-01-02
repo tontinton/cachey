@@ -1,0 +1,8 @@
+[package]
+name = "rsmp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rsmp-derive = { path = "../rsmp-derive" }
+thiserror = "2.0"

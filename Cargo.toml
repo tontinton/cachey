@@ -1,6 +1,31 @@
+[workspace]
+members = [".", "rsmp", "rsmp-derive"]
+
 [package]
 name = "cachey"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rsmp = { path = "rsmp" }
+clap = { version = "4.5.53", features = ["derive"] }
+eyre = "0.6.12"
+libc = "0.2"
+nix = { version = "0.30", features = ["zerocopy", "sched"] }
+mimalloc = "0.1.48"
+thiserror = "2.0.17"
+compio = { version = "0.14", features = ["macros", "signal", "io-compat"] }
+socket2 = "0.5"
+async-broadcast = "0.7"
+futures-util = "0.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter"] }
+num_cpus = "1.17.0"
+quick_cache = { version = "0.6", features = ["stats"] }
+flume = "0.11"
+bytesize = "2.3.1"
+prometheus = "0.14"
+strum = { version = "0.27", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
