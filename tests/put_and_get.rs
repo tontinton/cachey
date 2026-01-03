@@ -35,6 +35,10 @@ impl TestServer {
     }
 
     fn start_with_memory_cache_size(memory_cache_size: ByteSize) -> Self {
+        Self::start_with_config(memory_cache_size, None)
+    }
+
+    fn start_with_config(memory_cache_size: ByteSize, memory_limit: Option<ByteSize>) -> Self {
         let temp_dir = tempfile::tempdir().unwrap();
         let port = get_free_port();
         let addr = format!("127.0.0.1:{}", port);
@@ -48,7 +52,7 @@ impl TestServer {
             disk_cache_size: ByteSize::mib(10),
             memory_cache_size,
             metrics_listen: metrics_addr,
-            memory_limit: None,
+            memory_limit,
         };
 
         let (shutdown_tx, shutdown_rx) = broadcast::<()>(1);
@@ -386,6 +390,76 @@ fn get_partial_file_from_disk() {
                 let mut received = vec![0u8; 1000];
                 body.read_exact(&mut received).await.unwrap();
                 assert_eq!(received, &data[5000..6000]);
+            }
+        });
+}
+
+#[test]
+fn get_range_past_eof_returns_partial_data() {
+    let data: Vec<u8> = (0..100).collect();
+    let server = TestServer::start();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+
+            client
+                .put(
+                    &"small".to_string(),
+                    &None,
+                    BodyStream::new(&data[..], data.len() as u64),
+                )
+                .await
+                .unwrap();
+
+            let mut body = client
+                .get(&"small".to_string(), &50u64, &200u64)
+                .await
+                .unwrap();
+
+            let mut received = Vec::new();
+            body.read_to_end(&mut received).await.unwrap();
+
+            assert_eq!(received.len(), 50, "should only return 50 bytes (100 - 50 offset)");
+            assert_eq!(received, &data[50..100]);
+        });
+}
+
+#[test]
+fn sequential_requests_complete_under_memory_pressure() {
+    let data: Vec<u8> = (0u8..=255).cycle().take(256 * 1024).collect();
+    let server = TestServer::start_with_config(ByteSize::kib(64), Some(ByteSize::mib(1)));
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+
+            client
+                .put(
+                    &"pressure-test".to_string(),
+                    &None,
+                    BodyStream::new(&data[..], data.len() as u64),
+                )
+                .await
+                .unwrap();
+
+            for _ in 0..3 {
+                let mut body = client
+                    .get(&"pressure-test".to_string(), &0u64, &(256 * 1024u64))
+                    .await
+                    .unwrap();
+
+                let mut received = Vec::new();
+                body.read_to_end(&mut received).await.unwrap();
+                assert_eq!(received.len(), 256 * 1024);
             }
         });
 }

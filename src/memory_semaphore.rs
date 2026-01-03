@@ -1,10 +1,11 @@
 use std::fs;
+use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
 const DEFAULT_MEMORY_LIMIT: u64 = 100 * 1024 * 1024 * 1024;
 const MEMORY_HEADROOM_FACTOR: f64 = 0.85;
-const MEMORY_PERMIT_UNIT: u64 = 4096;
+pub const MEMORY_PERMIT_UNIT: u64 = 4096;
 
 fn get_cgroup_memory_limit() -> Option<u64> {
     if let Ok(limit_str) = fs::read_to_string("/sys/fs/cgroup/memory.max") {
@@ -38,7 +39,7 @@ fn compute_semaphore_capacity(memory_cache_size: u64, fallback_limit: Option<u64
 }
 
 pub struct MemorySemaphore {
-    semaphore: Semaphore,
+    semaphore: Arc<Semaphore>,
     capacity: usize,
 }
 
@@ -47,7 +48,7 @@ impl MemorySemaphore {
     pub fn new(memory_cache_size: u64, fallback_limit: Option<u64>) -> Self {
         let capacity = compute_semaphore_capacity(memory_cache_size, fallback_limit);
         Self {
-            semaphore: Semaphore::new(capacity),
+            semaphore: Arc::new(Semaphore::new(capacity)),
             capacity,
         }
     }
@@ -57,18 +58,31 @@ impl MemorySemaphore {
         self.capacity
     }
 
-    pub async fn acquire(&self, bytes: u64) {
+    pub async fn acquire(&self, bytes: u64) -> MemoryPermit {
         let permits = bytes_to_permits(bytes);
         self.semaphore
             .acquire_many(permits)
             .await
             .expect("semaphore closed")
             .forget();
+        MemoryPermit {
+            semaphore: Arc::clone(&self.semaphore),
+            permits,
+        }
     }
 
-    pub fn release(&self, bytes: u64) {
+    pub fn try_acquire(&self, bytes: u64) -> Option<MemoryPermit> {
         let permits = bytes_to_permits(bytes);
-        self.semaphore.add_permits(permits as usize);
+        match self.semaphore.try_acquire_many(permits) {
+            Ok(permit) => {
+                permit.forget();
+                Some(MemoryPermit {
+                    semaphore: Arc::clone(&self.semaphore),
+                    permits,
+                })
+            }
+            Err(_) => None,
+        }
     }
 
     #[must_use]
@@ -87,16 +101,26 @@ impl MemorySemaphore {
     }
 }
 
+pub struct MemoryPermit {
+    semaphore: Arc<Semaphore>,
+    permits: u32,
+}
+
+impl Drop for MemoryPermit {
+    fn drop(&mut self) {
+        self.semaphore.add_permits(self.permits as usize);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::time::Duration;
 
     fn create_test_semaphore(capacity_bytes: u64) -> MemorySemaphore {
         let capacity = bytes_to_permits(capacity_bytes) as usize;
         MemorySemaphore {
-            semaphore: Semaphore::new(capacity),
+            semaphore: Arc::new(Semaphore::new(capacity)),
             capacity,
         }
     }
@@ -114,30 +138,30 @@ mod tests {
         let sem = create_test_semaphore(1024 * 1024);
         let initial = sem.available_permits();
 
-        sem.acquire(64 * 1024).await;
-        sem.acquire(32 * 1024).await;
+        let p1 = sem.acquire(64 * 1024).await;
+        let p2 = sem.acquire(32 * 1024).await;
         let expected_used = bytes_to_permits(64 * 1024 + 32 * 1024) as usize;
         assert_eq!(sem.available_permits(), initial - expected_used);
 
-        sem.release(64 * 1024);
-        sem.release(32 * 1024);
+        drop(p1);
+        drop(p2);
         assert_eq!(sem.available_permits(), initial);
     }
 
     #[tokio::test]
     async fn acquire_blocks_when_insufficient_permits() {
         let sem = Arc::new(create_test_semaphore(8192));
-        sem.acquire(8192).await;
+        let _permit = sem.acquire(8192).await;
 
         let sem_clone = Arc::clone(&sem);
         let handle = tokio::spawn(async move {
-            sem_clone.acquire(4096).await;
+            let _p = sem_clone.acquire(4096).await;
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!handle.is_finished());
 
-        sem.release(4096);
+        drop(_permit);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(handle.is_finished());
     }
@@ -152,9 +176,8 @@ mod tests {
                 let sem_clone = Arc::clone(&sem);
                 tokio::spawn(async move {
                     for _ in 0..100 {
-                        sem_clone.acquire(4096).await;
+                        let _permit = sem_clone.acquire(4096).await;
                         tokio::task::yield_now().await;
-                        sem_clone.release(4096);
                     }
                 })
             })

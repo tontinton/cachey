@@ -98,68 +98,56 @@ pub struct CacheHandler {
 
 impl CacheHandler {
     async fn stream_from_file(
-        &self,
         file: &File,
         stream: &mut TcpStreamCompat,
         offset: u64,
         size: u64,
-    ) -> io::Result<()> {
+    ) -> io::Result<u64> {
+        let file_size = file.metadata().await?.len();
+        let actual_size = size.min(file_size.saturating_sub(offset));
+
         stream
             .0
-            .write_all(size.to_be_bytes().to_vec())
+            .write_all(actual_size.to_be_bytes().to_vec())
             .await
             .result()?;
 
         let mut current_offset = offset;
-        let end_offset = offset + size;
+        let end_offset = offset + actual_size;
 
         while current_offset < end_offset {
             let to_read = ((end_offset - current_offset) as usize).min(STREAM_FILE_BUF_SIZE);
-            self.memory_semaphore.acquire(to_read as u64).await;
             let buf = vec![0u8; to_read];
             let (n, buf) = file.read_at(buf, current_offset).await.result()?;
             if n == 0 {
-                self.memory_semaphore.release(to_read as u64);
                 break;
             }
             let to_write = n.min((end_offset - current_offset) as usize);
             let write_buf = buf.slice(..to_write);
             let ((), _) = stream.0.write_all(write_buf).await.result()?;
-            self.memory_semaphore.release(to_read as u64);
             current_offset += to_write as u64;
         }
 
-        Ok(())
+        Ok(current_offset - offset)
     }
 
-    async fn stream_buffer(&self, data: &[u8], stream: &mut TcpStreamCompat) -> io::Result<()> {
+    async fn stream_buffer(data: &[u8], stream: &mut TcpStreamCompat) -> io::Result<()> {
         let len = data.len() as u64;
-        self.memory_semaphore.acquire(len).await;
         stream
             .0
             .write_all(len.to_be_bytes().to_vec())
             .await
             .result()?;
         stream.0.write_all(data.to_vec()).await.result()?;
-        self.memory_semaphore.release(len);
         Ok(())
     }
 
     async fn stream_to_file(
-        &self,
         stream: &mut TcpStreamCompat,
         file: &mut File,
         size: u64,
         cache_ranges: Vec<Range<u64>>,
     ) -> io::Result<Vec<(Range<u64>, Vec<u8>)>> {
-        let total_capture_size: u64 = cache_ranges
-            .iter()
-            .map(|r| (r.end - r.start).min(size))
-            .sum();
-        let total_acquire = STREAM_FILE_BUF_SIZE as u64 + total_capture_size;
-
-        self.memory_semaphore.acquire(total_acquire).await;
-
         let mut buf = Vec::with_capacity(STREAM_FILE_BUF_SIZE);
         let mut captures: Vec<(Range<u64>, Vec<u8>)> = cache_ranges
             .into_iter()
@@ -190,7 +178,6 @@ impl CacheHandler {
             file_offset += n as u64;
         }
 
-        self.memory_semaphore.release(STREAM_FILE_BUF_SIZE as u64);
         Ok(captures)
     }
 }
@@ -204,18 +191,21 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         size: u64,
         stream: &mut TcpStreamCompat,
     ) -> Result<u64, CacheError> {
+        let _permit = self.memory_semaphore.acquire(STREAM_FILE_BUF_SIZE as u64).await;
+
         let end = offset + size;
         if let Some(data) = self.memory_cache.get(&id, offset, end) {
             debug!(
                 shard_id = self.shard_id,
                 id, offset, size, "memory cache hit"
             );
-            self.stream_buffer(&data, stream).await?;
+            let bytes_sent = data.len() as u64;
+            Self::stream_buffer(&data, stream).await?;
             METRICS
                 .bytes_read_total
                 .with_label_values(&[Self::GET_NAME])
-                .inc_by(size);
-            return Ok(size);
+                .inc_by(bytes_sent);
+            return Ok(bytes_sent);
         }
 
         let path = match self.disk_cache.get(&id) {
@@ -229,14 +219,14 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         debug!(shard_id = self.shard_id, id, ?path, "disk cache hit");
 
         let file = File::open(&path).await?;
-        self.stream_from_file(&file, stream, offset, size).await?;
+        let bytes_sent = Self::stream_from_file(&file, stream, offset, size).await?;
 
         METRICS
             .bytes_read_total
             .with_label_values(&[Self::GET_NAME])
-            .inc_by(size);
+            .inc_by(bytes_sent);
 
-        Ok(size)
+        Ok(bytes_sent)
     }
 
     async fn put(
@@ -246,20 +236,24 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         stream: &mut TcpStreamCompat,
         size: u64,
     ) -> Result<(), CacheError> {
+        let ranges = memory_cache_ranges
+            .map(|r| r.into_inner())
+            .unwrap_or_default();
+
+        let total_capture_size: u64 = ranges.iter().map(|r| (r.end - r.start).min(size)).sum();
+        let permit_size = STREAM_FILE_BUF_SIZE as u64 + total_capture_size;
+        let _permit = self.memory_semaphore.acquire(permit_size).await;
+
         let path = self.disk_cache.generate_path(&id);
 
         debug!(shard_id = self.shard_id, id, ?path, "writing");
 
         let mut file = File::create(&path).await?;
-        let ranges = memory_cache_ranges
-            .map(|r| r.into_inner())
-            .unwrap_or_default();
 
-        let captures = self.stream_to_file(stream, &mut file, size, ranges).await?;
+        let captures = Self::stream_to_file(stream, &mut file, size, ranges).await?;
 
         for (range, data) in captures {
-            let data_len = data.len();
-            if data_len as u64 == range.end - range.start {
+            if data.len() as u64 == range.end - range.start {
                 debug!(
                     shard_id = self.shard_id,
                     id,
@@ -270,7 +264,6 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
                 self.memory_cache
                     .insert(id.clone(), range.start, range.end, data);
             }
-            self.memory_semaphore.release(data_len as u64);
         }
 
         self.disk_cache.insert(id, size);

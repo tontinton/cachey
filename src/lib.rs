@@ -12,7 +12,7 @@ pub mod metrics;
 pub mod proto;
 pub mod server;
 
-pub use memory_semaphore::MemorySemaphore;
+pub use memory_semaphore::{MEMORY_PERMIT_UNIT, MemoryPermit, MemorySemaphore};
 
 pub trait BufResultExt<T, B> {
     fn result(self) -> io::Result<(T, B)>;
