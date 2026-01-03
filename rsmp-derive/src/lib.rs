@@ -59,11 +59,11 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 }
             }
 
-            impl rsmp::Decode for #name {
-                fn decode(_wire_type: rsmp::WireType, data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
-                    rsmp::Args::decode_args(data)
-                }
+        impl rsmp::Decode<'_> for #name {
+            fn decode(_wire_type: rsmp::WireType, data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
+                rsmp::Args::decode_args(data)
             }
+        }
         });
     }
 
@@ -182,7 +182,7 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 #idx => {
                     if __wire_type != rsmp::WireType::None {
                         #var_name = Some(
-                            <#inner_ty as rsmp::Decode>::decode(__wire_type, __bytes)?
+                            <#inner_ty as rsmp::Decode<'_>>::decode(__wire_type, __bytes)?
                         );
                     }
                 }
@@ -192,7 +192,7 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
             quote! {
                 #idx => {
                     #var_name = Some(
-                        <#ty as rsmp::Decode>::decode(__wire_type, __bytes)?
+                        <#ty as rsmp::Decode<'_>>::decode(__wire_type, __bytes)?
                     );
                 }
             }
@@ -260,7 +260,7 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl rsmp::Decode for #name {
+        impl rsmp::Decode<'_> for #name {
             fn decode(_wire_type: rsmp::WireType, data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
                 rsmp::Args::decode_args(data)
             }
@@ -403,7 +403,7 @@ fn impl_args_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl rsmp::Decode for #name {
+        impl rsmp::Decode<'_> for #name {
             fn decode(_wire_type: rsmp::WireType, data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
                 rsmp::Args::decode_args(data)
             }
@@ -725,7 +725,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                         quote! {
                             let #var_name: #ty = __arg_map.get(&#i)
                                 .ok_or(rsmp::ProtocolError::MissingField(#i))
-                                .and_then(|(wt, data)| <#ty as rsmp::Decode>::decode(*wt, data))?;
+                                .and_then(|(wt, data)| <#ty as rsmp::Decode<'_>>::decode(*wt, data))?;
                         }
                     }
                 })

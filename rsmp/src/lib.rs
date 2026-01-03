@@ -69,8 +69,8 @@ pub trait Encode {
     fn wire_type(&self) -> WireType;
 }
 
-pub trait Decode: Sized {
-    fn decode(wire_type: WireType, data: &[u8]) -> Result<Self, ProtocolError>;
+pub trait Decode<'a>: Sized {
+    fn decode(wire_type: WireType, data: &'a [u8]) -> Result<Self, ProtocolError>;
 }
 
 pub trait Args: Sized {
@@ -82,6 +82,7 @@ impl Args for std::convert::Infallible {
     fn encode_args(&self) -> Vec<u8> {
         match *self {}
     }
+
     fn decode_args(_data: &[u8]) -> Result<Self, ProtocolError> {
         Err(ProtocolError::UnknownVariant(0))
     }
@@ -263,12 +264,13 @@ macro_rules! impl_int {
             fn encode(&self, buf: &mut Vec<u8>) {
                 buf.extend_from_slice(&self.to_be_bytes());
             }
+
             fn wire_type(&self) -> WireType {
                 WireType::$wire
             }
         }
 
-        impl Decode for $t {
+        impl Decode<'_> for $t {
             fn decode(wire_type: WireType, data: &[u8]) -> Result<Self, ProtocolError> {
                 if wire_type != WireType::$wire {
                     return Err(ProtocolError::InvalidWireType(wire_type as u8));
@@ -319,12 +321,13 @@ impl Encode for bool {
     fn encode(&self, buf: &mut Vec<u8>) {
         buf.push(if *self { 1 } else { 0 });
     }
+
     fn wire_type(&self) -> WireType {
         WireType::Bool
     }
 }
 
-impl Decode for bool {
+impl Decode<'_> for bool {
     fn decode(wire_type: WireType, data: &[u8]) -> Result<Self, ProtocolError> {
         if wire_type != WireType::Bool {
             return Err(ProtocolError::InvalidWireType(wire_type as u8));
@@ -363,12 +366,13 @@ impl Encode for String {
     fn encode(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(self.as_bytes());
     }
+
     fn wire_type(&self) -> WireType {
         WireType::String
     }
 }
 
-impl Decode for String {
+impl Decode<'_> for String {
     fn decode(wire_type: WireType, data: &[u8]) -> Result<Self, ProtocolError> {
         if wire_type != WireType::String {
             return Err(ProtocolError::InvalidWireType(wire_type as u8));
@@ -404,12 +408,13 @@ impl Encode for Vec<u8> {
     fn encode(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(self);
     }
+
     fn wire_type(&self) -> WireType {
         WireType::Bytes
     }
 }
 
-impl Decode for Vec<u8> {
+impl Decode<'_> for Vec<u8> {
     fn decode(wire_type: WireType, data: &[u8]) -> Result<Self, ProtocolError> {
         if wire_type != WireType::Bytes {
             return Err(ProtocolError::InvalidWireType(wire_type as u8));
@@ -438,6 +443,44 @@ impl Args for Vec<u8> {
         }
         let (_, wire_type, field_data, _) = read_field(&data[2..])?;
         Self::decode(wire_type, field_data)
+    }
+}
+
+impl Encode for &[u8] {
+    fn encode(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(self);
+    }
+
+    fn wire_type(&self) -> WireType {
+        WireType::Bytes
+    }
+}
+
+impl<'a> Decode<'a> for &'a [u8] {
+    fn decode(wire_type: WireType, data: &'a [u8]) -> Result<Self, ProtocolError> {
+        if wire_type != WireType::Bytes {
+            return Err(ProtocolError::InvalidWireType(wire_type as u8));
+        }
+        Ok(data)
+    }
+}
+
+impl Encode for &str {
+    fn encode(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(self.as_bytes());
+    }
+
+    fn wire_type(&self) -> WireType {
+        WireType::String
+    }
+}
+
+impl<'a> Decode<'a> for &'a str {
+    fn decode(wire_type: WireType, data: &'a [u8]) -> Result<Self, ProtocolError> {
+        if wire_type != WireType::String {
+            return Err(ProtocolError::InvalidWireType(wire_type as u8));
+        }
+        std::str::from_utf8(data).map_err(|_| ProtocolError::InvalidUtf8)
     }
 }
 
@@ -625,6 +668,49 @@ mod tests {
         val.encode(&mut buf);
         let decoded = Vec::<u8>::decode(WireType::Bytes, &buf).unwrap();
         assert_eq!(val, decoded);
+    }
+
+    #[test]
+    fn byte_slice_encode_decode() {
+        let data: &[u8] = &[1, 2, 3, 4, 5];
+        let mut buf = Vec::new();
+        data.encode(&mut buf);
+        assert_eq!(buf, vec![1, 2, 3, 4, 5]);
+
+        let decoded: &[u8] = Decode::decode(WireType::Bytes, &buf).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn byte_slice_borrows_from_input() {
+        let input = vec![10, 20, 30];
+        let decoded: &[u8] = Decode::decode(WireType::Bytes, &input).unwrap();
+        assert!(std::ptr::eq(decoded.as_ptr(), input.as_ptr()));
+    }
+
+    #[test]
+    fn str_slice_encode_decode() {
+        let data: &str = "hello world";
+        let mut buf = Vec::new();
+        data.encode(&mut buf);
+        assert_eq!(buf, b"hello world");
+
+        let decoded: &str = Decode::decode(WireType::String, &buf).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn str_slice_borrows_from_input() {
+        let input = b"test string".to_vec();
+        let decoded: &str = Decode::decode(WireType::String, &input).unwrap();
+        assert!(std::ptr::eq(decoded.as_ptr(), input.as_ptr()));
+    }
+
+    #[test]
+    fn str_slice_invalid_utf8_errors() {
+        let invalid = vec![0xFF, 0xFE];
+        let result: Result<&str, _> = Decode::decode(WireType::String, &invalid);
+        assert!(matches!(result, Err(ProtocolError::InvalidUtf8)));
     }
 
     #[test]
