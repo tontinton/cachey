@@ -33,6 +33,11 @@ pub struct Args {
     /// Metrics listen address (host:port).
     #[clap(long, default_value = "0.0.0.0:9090")]
     pub metrics_listen: String,
+
+    /// Memory limit for semaphore (fallback if cgroup detection fails).
+    /// Defaults to 100GiB if not specified.
+    #[clap(long, value_parser = parse_bytes)]
+    pub memory_limit: Option<ByteSize>,
 }
 
 fn parse_bytes(s: &str) -> Result<ByteSize, String> {

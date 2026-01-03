@@ -5,12 +5,13 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::runtime::spawn;
 use prometheus::{
-    Histogram, IntCounterVec, IntGaugeVec, TextEncoder, register_histogram,
-    register_int_counter_vec, register_int_gauge_vec,
+    Histogram, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder, register_histogram,
+    register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
 };
 use tracing::{debug, error};
 
 use crate::cache::{DiskCache, MemoryCache};
+use crate::memory_semaphore::MemorySemaphore;
 use crate::{BufResultExt, create_listener};
 
 pub static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::default);
@@ -31,6 +32,10 @@ pub struct Metrics {
     pub cache_capacity_bytes: IntGaugeVec,
     pub cache_hits_total: IntGaugeVec,
     pub cache_misses_total: IntGaugeVec,
+
+    // Memory semaphore metrics
+    pub memory_semaphore_capacity_bytes: IntGauge,
+    pub memory_semaphore_allocated_bytes: IntGauge,
 }
 
 impl Default for Metrics {
@@ -104,12 +109,29 @@ impl Default for Metrics {
                 &["type"]
             )
             .expect("create cache_misses_total"),
+
+            memory_semaphore_capacity_bytes: register_int_gauge!(
+                "cachey_memory_semaphore_capacity_bytes",
+                "Total capacity of the memory semaphore in bytes"
+            )
+            .expect("create memory_semaphore_capacity_bytes"),
+
+            memory_semaphore_allocated_bytes: register_int_gauge!(
+                "cachey_memory_semaphore_allocated_bytes",
+                "Currently allocated bytes in the memory semaphore"
+            )
+            .expect("create memory_semaphore_allocated_bytes"),
         }
     }
 }
 
 impl Metrics {
-    fn update_cache_stats(&self, disk_cache: &DiskCache, memory_cache: &MemoryCache) {
+    fn update_stats(
+        &self,
+        disk_cache: &DiskCache,
+        memory_cache: &MemoryCache,
+        memory_semaphore: &MemorySemaphore,
+    ) {
         self.cache_items
             .with_label_values(&["disk"])
             .set(disk_cache.len() as i64);
@@ -141,11 +163,20 @@ impl Metrics {
         self.cache_misses_total
             .with_label_values(&["memory"])
             .set(memory_cache.misses() as i64);
+
+        self.memory_semaphore_capacity_bytes
+            .set(memory_semaphore.capacity_bytes() as i64);
+        self.memory_semaphore_allocated_bytes
+            .set(memory_semaphore.allocated_bytes() as i64);
     }
 }
 
-fn render(disk_cache: &DiskCache, memory_cache: &MemoryCache) -> String {
-    METRICS.update_cache_stats(disk_cache, memory_cache);
+fn render(
+    disk_cache: &DiskCache,
+    memory_cache: &MemoryCache,
+    memory_semaphore: &MemorySemaphore,
+) -> String {
+    METRICS.update_stats(disk_cache, memory_cache, memory_semaphore);
 
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
@@ -158,6 +189,7 @@ async fn handle_metrics_request(
     mut stream: TcpStream,
     disk_cache: Arc<DiskCache>,
     memory_cache: Arc<MemoryCache>,
+    memory_semaphore: Arc<MemorySemaphore>,
 ) {
     let buf = vec![0u8; 1024];
     let Ok((n, buf)) = stream.read(buf).await.result() else {
@@ -172,7 +204,7 @@ async fn handle_metrics_request(
     let is_metrics_request = request.starts_with("GET /metrics") || request.starts_with("GET / ");
 
     let response = if is_metrics_request {
-        let body = render(&disk_cache, &memory_cache);
+        let body = render(&disk_cache, &memory_cache, &memory_semaphore);
         format!(
             "HTTP/1.1 200 OK\r\n\
              Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\
@@ -199,6 +231,7 @@ pub async fn serve_metrics(
     listen: String,
     disk_cache: Arc<DiskCache>,
     memory_cache: Arc<MemoryCache>,
+    memory_semaphore: Arc<MemorySemaphore>,
 ) {
     let listener = match create_listener(&listen, METRICS_SERVER_NUM_LISTENERS) {
         Ok(l) => l,
@@ -215,7 +248,14 @@ pub async fn serve_metrics(
             Ok((stream, _addr)) => {
                 let disk_cache = Arc::clone(&disk_cache);
                 let memory_cache = Arc::clone(&memory_cache);
-                spawn(handle_metrics_request(stream, disk_cache, memory_cache)).detach();
+                let memory_semaphore = Arc::clone(&memory_semaphore);
+                spawn(handle_metrics_request(
+                    stream,
+                    disk_cache,
+                    memory_cache,
+                    memory_semaphore,
+                ))
+                .detach();
             }
             Err(e) => {
                 error!(shard_id, "Metrics accept error: {e}");

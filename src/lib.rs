@@ -7,9 +7,12 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 pub mod args;
 pub mod cache;
+pub mod memory_semaphore;
 pub mod metrics;
 pub mod proto;
 pub mod server;
+
+pub use memory_semaphore::MemorySemaphore;
 
 pub trait BufResultExt<T, B> {
     fn result(self) -> io::Result<(T, B)>;

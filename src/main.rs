@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::thread;
 
 use async_broadcast::broadcast;
+use cachey::MemorySemaphore;
 use cachey::cache::{CleanupReceiver, DiskCache, MemoryCache, run_cleanup_loop};
 use cachey::metrics;
 use cachey::{
@@ -32,11 +33,13 @@ fn pin_to_core(core_id: usize) {
 #[cfg(not(target_os = "linux"))]
 fn pin_to_core(_core_id: usize) {}
 
+#[allow(clippy::too_many_arguments)]
 fn run_shard(
     shard_id: usize,
     args: Args,
     disk_cache: Arc<DiskCache>,
     memory_cache: Arc<MemoryCache>,
+    memory_semaphore: Arc<MemorySemaphore>,
     shutdown_tx: Option<async_broadcast::Sender<()>>,
     shutdown_rx: async_broadcast::Receiver<()>,
     cleanup_rx: CleanupReceiver,
@@ -53,6 +56,7 @@ fn run_shard(
             args.metrics_listen.clone(),
             Arc::clone(&disk_cache),
             Arc::clone(&memory_cache),
+            Arc::clone(&memory_semaphore),
         ))
         .detach();
 
@@ -61,6 +65,7 @@ fn run_shard(
             args,
             disk_cache,
             memory_cache,
+            memory_semaphore,
             shutdown_rx
         ));
 
@@ -108,11 +113,21 @@ fn main() -> eyre::Result<()> {
     let disk_cache = Arc::new(disk_cache);
     let memory_cache = Arc::new(MemoryCache::new(args.memory_cache_size.as_u64()));
 
+    let memory_semaphore = Arc::new(MemorySemaphore::new(
+        args.memory_cache_size.as_u64(),
+        args.memory_limit.map(|b| b.as_u64()),
+    ));
+    info!(
+        capacity = memory_semaphore.capacity(),
+        "Memory semaphore initialized"
+    );
+
     let workers: Vec<_> = (1..num_shards)
         .map(|shard_id| {
             let args = args.clone();
             let disk_cache = Arc::clone(&disk_cache);
             let memory_cache = Arc::clone(&memory_cache);
+            let memory_semaphore = Arc::clone(&memory_semaphore);
             let shutdown_rx = shutdown_rx.clone();
             let cleanup_rx = cleanup_rx.clone();
             thread::Builder::new()
@@ -123,6 +138,7 @@ fn main() -> eyre::Result<()> {
                         args,
                         disk_cache,
                         memory_cache,
+                        memory_semaphore,
                         None,
                         shutdown_rx,
                         cleanup_rx,
@@ -137,6 +153,7 @@ fn main() -> eyre::Result<()> {
         args,
         disk_cache,
         memory_cache,
+        memory_semaphore,
         Some(shutdown_tx),
         shutdown_rx,
         cleanup_rx,

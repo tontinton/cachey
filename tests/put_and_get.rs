@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_broadcast::broadcast;
 use bytesize::ByteSize;
+use cachey::MemorySemaphore;
 use cachey::args::Args as ServerArgs;
 use cachey::cache::{DiskCache, MemoryCache};
 use cachey::proto::{CacheServiceClient, MemoryCacheRanges};
@@ -47,6 +48,7 @@ impl TestServer {
             disk_cache_size: ByteSize::mib(10),
             memory_cache_size,
             metrics_listen: metrics_addr,
+            memory_limit: None,
         };
 
         let (shutdown_tx, shutdown_rx) = broadcast::<()>(1);
@@ -57,6 +59,10 @@ impl TestServer {
 
         let disk_cache_clone = Arc::clone(&disk_cache);
         let memory_cache_clone = Arc::clone(&memory_cache);
+        let memory_semaphore = Arc::new(MemorySemaphore::new(
+            args.memory_cache_size.as_u64(),
+            args.memory_limit.map(|b| b.as_u64()),
+        ));
 
         let handle = thread::spawn(move || {
             let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
@@ -67,6 +73,7 @@ impl TestServer {
                     args,
                     disk_cache_clone,
                     memory_cache_clone,
+                    memory_semaphore,
                     shutdown_rx,
                 )
                 .await;

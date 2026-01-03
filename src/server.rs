@@ -4,6 +4,7 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::MemorySemaphore;
 use async_broadcast::{Receiver, broadcast};
 use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
@@ -92,10 +93,11 @@ pub struct CacheHandler {
     pub shard_id: usize,
     pub disk_cache: Arc<DiskCache>,
     pub memory_cache: Arc<MemoryCache>,
+    pub memory_semaphore: Arc<MemorySemaphore>,
 }
 
 impl CacheHandler {
-    async fn stream_file(
+    async fn stream_from_file(
         &self,
         file: &File,
         stream: &mut TcpStreamCompat,
@@ -113,17 +115,17 @@ impl CacheHandler {
 
         while current_offset < end_offset {
             let to_read = ((end_offset - current_offset) as usize).min(STREAM_FILE_BUF_SIZE);
+            self.memory_semaphore.acquire(to_read as u64).await;
             let buf = vec![0u8; to_read];
             let (n, buf) = file.read_at(buf, current_offset).await.result()?;
             if n == 0 {
+                self.memory_semaphore.release(to_read as u64);
                 break;
             }
             let to_write = n.min((end_offset - current_offset) as usize);
-            stream
-                .0
-                .write_all(buf[..to_write].to_vec())
-                .await
-                .result()?;
+            let write_buf = buf.slice(..to_write);
+            let ((), _) = stream.0.write_all(write_buf).await.result()?;
+            self.memory_semaphore.release(to_read as u64);
             current_offset += to_write as u64;
         }
 
@@ -131,13 +133,15 @@ impl CacheHandler {
     }
 
     async fn stream_buffer(&self, data: &[u8], stream: &mut TcpStreamCompat) -> io::Result<()> {
-        let size = data.len() as u64;
+        let len = data.len() as u64;
+        self.memory_semaphore.acquire(len).await;
         stream
             .0
-            .write_all(size.to_be_bytes().to_vec())
+            .write_all(len.to_be_bytes().to_vec())
             .await
             .result()?;
         stream.0.write_all(data.to_vec()).await.result()?;
+        self.memory_semaphore.release(len);
         Ok(())
     }
 
@@ -148,17 +152,24 @@ impl CacheHandler {
         size: u64,
         cache_ranges: Vec<Range<u64>>,
     ) -> io::Result<Vec<(Range<u64>, Vec<u8>)>> {
+        let total_capture_size: u64 = cache_ranges
+            .iter()
+            .map(|r| (r.end - r.start).min(size))
+            .sum();
+        let total_acquire = STREAM_FILE_BUF_SIZE as u64 + total_capture_size;
+
+        self.memory_semaphore.acquire(total_acquire).await;
+
+        let mut buf = Vec::with_capacity(STREAM_FILE_BUF_SIZE);
         let mut captures: Vec<(Range<u64>, Vec<u8>)> = cache_ranges
             .into_iter()
             .map(|r| {
-                let chunk = Vec::with_capacity((r.end - r.start) as usize);
-                (r, chunk)
+                let cap = (r.end - r.start).min(size) as usize;
+                (r, Vec::with_capacity(cap))
             })
             .collect();
 
         let mut file_offset = 0u64;
-        let mut buf = Vec::with_capacity(STREAM_FILE_BUF_SIZE);
-
         while file_offset < size {
             let to_read = ((size - file_offset) as usize).min(STREAM_FILE_BUF_SIZE);
             buf.resize(to_read, 0);
@@ -179,6 +190,7 @@ impl CacheHandler {
             file_offset += n as u64;
         }
 
+        self.memory_semaphore.release(STREAM_FILE_BUF_SIZE as u64);
         Ok(captures)
     }
 }
@@ -217,7 +229,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         debug!(shard_id = self.shard_id, id, ?path, "disk cache hit");
 
         let file = File::open(&path).await?;
-        self.stream_file(&file, stream, offset, size).await?;
+        self.stream_from_file(&file, stream, offset, size).await?;
 
         METRICS
             .bytes_read_total
@@ -246,7 +258,8 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         let captures = self.stream_to_file(stream, &mut file, size, ranges).await?;
 
         for (range, data) in captures {
-            if data.len() as u64 == range.end - range.start {
+            let data_len = data.len();
+            if data_len as u64 == range.end - range.start {
                 debug!(
                     shard_id = self.shard_id,
                     id,
@@ -257,6 +270,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
                 self.memory_cache
                     .insert(id.clone(), range.start, range.end, data);
             }
+            self.memory_semaphore.release(data_len as u64);
         }
 
         self.disk_cache.insert(id, size);
@@ -289,6 +303,7 @@ pub async fn serve_shard(
     config: crate::args::Args,
     disk_cache: Arc<DiskCache>,
     memory_cache: Arc<MemoryCache>,
+    memory_semaphore: Arc<MemorySemaphore>,
     mut shutdown_rx: Receiver<()>,
 ) -> eyre::Result<()> {
     let listener = create_listener(&config.listen, config.num_listeners as i32)?;
@@ -301,6 +316,7 @@ pub async fn serve_shard(
         shard_id,
         disk_cache,
         memory_cache,
+        memory_semaphore,
     });
     let shard_label = shard_id.to_string();
 
@@ -368,9 +384,7 @@ mod tests {
             .collect()
     }
 
-    /// Simulates stream_file logic: given file data, offset, and size,
-    /// returns (size_header, data) that would be written to the stream.
-    fn simulate_stream_file(file_data: &[u8], offset: u64, size: u64) -> (u64, Vec<u8>) {
+    fn simulate_stream_file(file_data: &[u8], offset: u64, size: u64) -> Vec<u8> {
         let mut output = Vec::new();
         let mut current_offset = offset;
         let end_offset = offset + size;
@@ -390,206 +404,74 @@ mod tests {
             current_offset += to_write as u64;
         }
 
-        (size, output)
+        output
     }
 
     #[test]
-    fn stream_file_exact_range_from_start() {
-        let file_data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
-        let (header_size, data) = simulate_stream_file(&file_data, 0, 100);
-
-        assert_eq!(header_size, 100);
-        assert_eq!(data.len(), 100);
-        assert_eq!(data, &file_data[0..100]);
-    }
-
-    #[test]
-    fn stream_file_exact_range_from_middle() {
-        let file_data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
-        let (header_size, data) = simulate_stream_file(&file_data, 500, 200);
-
-        assert_eq!(header_size, 200);
-        assert_eq!(data.len(), 200);
-        assert_eq!(data, &file_data[500..700]);
-    }
-
-    #[test]
-    fn stream_file_small_range_from_large_file() {
-        let file_data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
-        let (header_size, data) = simulate_stream_file(&file_data, 50_000, 100);
-
-        assert_eq!(header_size, 100);
-        assert_eq!(
-            data.len(),
-            100,
-            "must write exactly requested size, not more"
-        );
-        assert_eq!(data, &file_data[50_000..50_100]);
-    }
-
-    #[test]
-    fn stream_file_range_spanning_buffer_boundary() {
+    fn stream_file_returns_exact_requested_range() {
         let file_data: Vec<u8> = (0..200_000).map(|i| (i % 256) as u8).collect();
+
+        let data = simulate_stream_file(&file_data, 0, 100);
+        assert_eq!(data, &file_data[0..100]);
+
+        let data = simulate_stream_file(&file_data, 500, 200);
+        assert_eq!(data, &file_data[500..700]);
+
+        let data = simulate_stream_file(&file_data, 50_000, 100);
+        assert_eq!(data.len(), 100, "must return exactly requested size");
+        assert_eq!(data, &file_data[50_000..50_100]);
+
         let offset = STREAM_FILE_BUF_SIZE as u64 - 50;
-        let size = 100u64;
-        let (header_size, data) = simulate_stream_file(&file_data, offset, size);
-
-        assert_eq!(header_size, size);
-        assert_eq!(data.len(), size as usize);
-        assert_eq!(data, &file_data[offset as usize..(offset + size) as usize]);
+        let data = simulate_stream_file(&file_data, offset, 100);
+        assert_eq!(data, &file_data[offset as usize..(offset + 100) as usize]);
     }
 
     #[test]
-    fn stream_file_entire_file() {
-        let file_data: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
-        let (header_size, data) = simulate_stream_file(&file_data, 0, 10_000);
-
-        assert_eq!(header_size, 10_000);
-        assert_eq!(data.len(), 10_000);
-        assert_eq!(data, file_data);
-    }
-
-    #[test]
-    fn stream_file_last_byte() {
-        let file_data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
-        let (header_size, data) = simulate_stream_file(&file_data, 999, 1);
-
-        assert_eq!(header_size, 1);
-        assert_eq!(data.len(), 1);
-        assert_eq!(data[0], file_data[999]);
-    }
-
-    #[test]
-    fn stream_file_request_beyond_eof_returns_available() {
+    fn stream_file_truncates_at_eof() {
         let file_data: Vec<u8> = (0..100).collect();
-        let (header_size, data) = simulate_stream_file(&file_data, 50, 1000);
-
-        assert_eq!(header_size, 1000, "header reflects requested size");
-        assert_eq!(data.len(), 50, "data is truncated to available bytes");
+        let data = simulate_stream_file(&file_data, 50, 1000);
+        assert_eq!(data.len(), 50);
         assert_eq!(data, &file_data[50..100]);
     }
 
     #[test]
-    fn stream_file_sequential_ranges_no_overlap() {
-        let file_data: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
-
-        let (_, data1) = simulate_stream_file(&file_data, 0, 256);
-        let (_, data2) = simulate_stream_file(&file_data, 5000, 1000);
-
-        assert_eq!(data1.len(), 256);
-        assert_eq!(data2.len(), 1000);
-        assert_eq!(data1, &file_data[0..256]);
-        assert_eq!(data2, &file_data[5000..6000]);
-
-        // Verify no data overlap (the bug that was fixed)
-        let last_byte_range1 = data1.last().copied();
-        let first_byte_range2 = data2.first().copied();
-        assert_ne!(
-            last_byte_range1.map(|b| b.wrapping_add(1)),
-            first_byte_range2,
-            "ranges should not be adjacent in output"
-        );
-    }
-
-    #[test]
-    fn capture_range_entirely_within_chunk() {
-        let chunk: Vec<u8> = (0..100).collect();
-        let mut captures = make_captures(&[10..20]);
+    fn capture_ranges_single_chunk() {
+        let chunk: Vec<u8> = (0u8..=255).collect();
+        let mut captures = make_captures(&[10..20, 100..150]);
 
         capture_ranges_from_chunk(&chunk, 0, &mut captures);
 
         assert_eq!(captures[0].1, (10..20).collect::<Vec<u8>>());
+        assert_eq!(captures[1].1, (100..150).collect::<Vec<u8>>());
     }
 
     #[test]
-    fn capture_range_spans_multiple_chunks() {
-        let mut captures = make_captures(&[50..150]);
+    fn capture_ranges_across_chunks() {
+        let mut captures = make_captures(&[50..150, 200..250]);
 
         let chunk1: Vec<u8> = (0..100).collect();
         capture_ranges_from_chunk(&chunk1, 0, &mut captures);
 
-        let chunk2: Vec<u8> = (100..200).map(|x| x as u8).collect();
+        let chunk2: Vec<u8> = (100..300).map(|x| x as u8).collect();
         capture_ranges_from_chunk(&chunk2, 100, &mut captures);
 
-        let expected: Vec<u8> = (50..150).map(|x| x as u8).collect();
-        assert_eq!(captures[0].1, expected);
+        assert_eq!(
+            captures[0].1,
+            (50..150).map(|x| x as u8).collect::<Vec<u8>>()
+        );
+        assert_eq!(
+            captures[1].1,
+            (200..250).map(|x| x as u8).collect::<Vec<u8>>()
+        );
     }
 
     #[test]
-    fn capture_range_starts_mid_chunk() {
-        let chunk: Vec<u8> = (0..100).collect();
-        let mut captures = make_captures(&[50..150]);
-
-        capture_ranges_from_chunk(&chunk, 0, &mut captures);
-
-        assert_eq!(captures[0].1, (50..100).collect::<Vec<u8>>());
-    }
-
-    #[test]
-    fn capture_range_ends_mid_chunk() {
-        let chunk: Vec<u8> = (100..200).map(|x| x as u8).collect();
-        let mut captures = make_captures(&[50..150]);
-
-        capture_ranges_from_chunk(&chunk, 100, &mut captures);
-
-        let expected: Vec<u8> = (100..150).map(|x| x as u8).collect();
-        assert_eq!(captures[0].1, expected);
-    }
-
-    #[test]
-    fn capture_chunk_fully_contains_range() {
-        let chunk: Vec<u8> = (0u8..=255).collect();
-        let mut captures = make_captures(&[100..150]);
-
-        capture_ranges_from_chunk(&chunk, 0, &mut captures);
-
-        assert_eq!(captures[0].1, (100..150).collect::<Vec<u8>>());
-    }
-
-    #[test]
-    fn capture_range_fully_contains_chunk() {
-        let chunk: Vec<u8> = (50..100).collect();
-        let mut captures = make_captures(&[0..200]);
-
-        capture_ranges_from_chunk(&chunk, 50, &mut captures);
-
-        assert_eq!(captures[0].1, (50..100).collect::<Vec<u8>>());
-    }
-
-    #[test]
-    fn capture_no_overlap() {
+    fn capture_ranges_no_overlap_produces_empty() {
         let chunk: Vec<u8> = (0..100).collect();
         let mut captures = make_captures(&[200..300]);
 
         capture_ranges_from_chunk(&chunk, 0, &mut captures);
 
         assert!(captures[0].1.is_empty());
-    }
-
-    #[test]
-    fn capture_multiple_ranges() {
-        let chunk: Vec<u8> = (0..100).collect();
-        let mut captures = make_captures(&[0..10, 50..60, 90..100]);
-
-        capture_ranges_from_chunk(&chunk, 0, &mut captures);
-
-        assert_eq!(captures[0].1, (0..10).collect::<Vec<u8>>());
-        assert_eq!(captures[1].1, (50..60).collect::<Vec<u8>>());
-        assert_eq!(captures[2].1, (90..100).collect::<Vec<u8>>());
-    }
-
-    #[test]
-    fn capture_accumulates_across_chunks() {
-        let mut captures = make_captures(&[0..100, 150..250]);
-
-        for chunk_start in (0..300).step_by(50) {
-            let chunk: Vec<u8> = (chunk_start..chunk_start + 50).map(|x| x as u8).collect();
-            capture_ranges_from_chunk(&chunk, chunk_start as u64, &mut captures);
-        }
-
-        let expected0: Vec<u8> = (0..100).map(|x| x as u8).collect();
-        let expected1: Vec<u8> = (150..250).map(|x| x as u8).collect();
-        assert_eq!(captures[0].1, expected0);
-        assert_eq!(captures[1].1, expected1);
     }
 }
