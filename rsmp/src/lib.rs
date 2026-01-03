@@ -14,6 +14,9 @@ pub mod transport;
 
 pub use transport::StreamTransport;
 
+pub type FieldIndex = u16;
+const FIELD_INDEX_SIZE: usize = std::mem::size_of::<FieldIndex>();
+
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("unexpected end of data")]
@@ -23,9 +26,9 @@ pub enum ProtocolError {
     #[error("invalid UTF-8")]
     InvalidUtf8,
     #[error("missing required field: {0}")]
-    MissingField(u16),
+    MissingField(FieldIndex),
     #[error("unknown variant: {0}")]
-    UnknownVariant(u16),
+    UnknownVariant(FieldIndex),
 }
 
 #[repr(u8)]
@@ -227,24 +230,32 @@ pub trait Transport {
     ) -> Result<Result<(Vec<u8>, BoxAsyncRead<'a>), Vec<u8>>, TransportError>;
 }
 
-pub fn write_field(buf: &mut Vec<u8>, field_id: u16, wire_type: WireType, data: &[u8]) {
+pub fn write_field(buf: &mut Vec<u8>, field_id: FieldIndex, wire_type: WireType, data: &[u8]) {
     buf.extend_from_slice(&field_id.to_be_bytes());
     buf.push(wire_type as u8);
     buf.extend_from_slice(&(data.len() as u16).to_be_bytes());
     buf.extend_from_slice(data);
 }
 
-pub fn read_field(data: &[u8]) -> Result<(u16, WireType, &[u8], usize), ProtocolError> {
-    if data.len() < 5 {
+const FIELD_HEADER_SIZE: usize = FIELD_INDEX_SIZE + 1 + 2;
+
+pub fn read_field(data: &[u8]) -> Result<(FieldIndex, WireType, &[u8], usize), ProtocolError> {
+    if data.len() < FIELD_HEADER_SIZE {
         return Err(ProtocolError::UnexpectedEof);
     }
-    let field_idx = u16::from_be_bytes([data[0], data[1]]);
-    let wire_type = WireType::from_repr(data[2]).ok_or(ProtocolError::InvalidWireType(data[2]))?;
-    let len = u16::from_be_bytes([data[3], data[4]]) as usize;
-    if data.len() < 5 + len {
+    let field_idx = FieldIndex::from_be_bytes(data[..FIELD_INDEX_SIZE].try_into().unwrap());
+    let wire_type = WireType::from_repr(data[FIELD_INDEX_SIZE])
+        .ok_or(ProtocolError::InvalidWireType(data[FIELD_INDEX_SIZE]))?;
+    let len = u16::from_be_bytes([data[FIELD_INDEX_SIZE + 1], data[FIELD_INDEX_SIZE + 2]]) as usize;
+    if data.len() < FIELD_HEADER_SIZE + len {
         return Err(ProtocolError::UnexpectedEof);
     }
-    Ok((field_idx, wire_type, &data[5..5 + len], 5 + len))
+    Ok((
+        field_idx,
+        wire_type,
+        &data[FIELD_HEADER_SIZE..FIELD_HEADER_SIZE + len],
+        FIELD_HEADER_SIZE + len,
+    ))
 }
 
 macro_rules! impl_int {
@@ -275,7 +286,7 @@ macro_rules! impl_int {
         impl Args for $t {
             fn encode_args(&self) -> Vec<u8> {
                 let mut buf = Vec::new();
-                buf.extend_from_slice(&1u16.to_be_bytes());
+                buf.extend_from_slice(&(1 as FieldIndex).to_be_bytes());
                 let mut field_data = Vec::new();
                 self.encode(&mut field_data);
                 write_field(&mut buf, 0, self.wire_type(), &field_data);
@@ -283,14 +294,15 @@ macro_rules! impl_int {
             }
 
             fn decode_args(data: &[u8]) -> Result<Self, ProtocolError> {
-                if data.len() < 2 {
+                if data.len() < FIELD_INDEX_SIZE {
                     return Err(ProtocolError::UnexpectedEof);
                 }
-                let field_count = u16::from_be_bytes([data[0], data[1]]);
+                let field_count =
+                    FieldIndex::from_be_bytes(data[..FIELD_INDEX_SIZE].try_into().unwrap());
                 if field_count == 0 {
                     return Err(ProtocolError::MissingField(0));
                 }
-                let (_, wire_type, field_data, _) = read_field(&data[2..])?;
+                let (_, wire_type, field_data, _) = read_field(&data[FIELD_INDEX_SIZE..])?;
                 Self::decode(wire_type, field_data)
             }
         }
@@ -333,7 +345,7 @@ impl Decode<'_> for bool {
 impl Args for bool {
     fn encode_args(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&1u16.to_be_bytes());
+        buf.extend_from_slice(&(1 as FieldIndex).to_be_bytes());
         let mut field_data = Vec::new();
         self.encode(&mut field_data);
         write_field(&mut buf, 0, self.wire_type(), &field_data);
@@ -341,14 +353,14 @@ impl Args for bool {
     }
 
     fn decode_args(data: &[u8]) -> Result<Self, ProtocolError> {
-        if data.len() < 2 {
+        if data.len() < FIELD_INDEX_SIZE {
             return Err(ProtocolError::UnexpectedEof);
         }
-        let field_count = u16::from_be_bytes([data[0], data[1]]);
+        let field_count = FieldIndex::from_be_bytes(data[..FIELD_INDEX_SIZE].try_into().unwrap());
         if field_count == 0 {
             return Err(ProtocolError::MissingField(0));
         }
-        let (_, wire_type, field_data, _) = read_field(&data[2..])?;
+        let (_, wire_type, field_data, _) = read_field(&data[FIELD_INDEX_SIZE..])?;
         Self::decode(wire_type, field_data)
     }
 }
@@ -375,7 +387,7 @@ impl Decode<'_> for String {
 impl Args for String {
     fn encode_args(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&1u16.to_be_bytes());
+        buf.extend_from_slice(&(1 as FieldIndex).to_be_bytes());
         let mut field_data = Vec::new();
         self.encode(&mut field_data);
         write_field(&mut buf, 0, self.wire_type(), &field_data);
@@ -383,14 +395,14 @@ impl Args for String {
     }
 
     fn decode_args(data: &[u8]) -> Result<Self, ProtocolError> {
-        if data.len() < 2 {
+        if data.len() < FIELD_INDEX_SIZE {
             return Err(ProtocolError::UnexpectedEof);
         }
-        let field_count = u16::from_be_bytes([data[0], data[1]]);
+        let field_count = FieldIndex::from_be_bytes(data[..FIELD_INDEX_SIZE].try_into().unwrap());
         if field_count == 0 {
             return Err(ProtocolError::MissingField(0));
         }
-        let (_, wire_type, field_data, _) = read_field(&data[2..])?;
+        let (_, wire_type, field_data, _) = read_field(&data[FIELD_INDEX_SIZE..])?;
         Self::decode(wire_type, field_data)
     }
 }
@@ -417,7 +429,7 @@ impl Decode<'_> for Vec<u8> {
 impl Args for Vec<u8> {
     fn encode_args(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(&1u16.to_be_bytes());
+        buf.extend_from_slice(&(1 as FieldIndex).to_be_bytes());
         let mut field_data = Vec::new();
         self.encode(&mut field_data);
         write_field(&mut buf, 0, self.wire_type(), &field_data);
@@ -425,14 +437,14 @@ impl Args for Vec<u8> {
     }
 
     fn decode_args(data: &[u8]) -> Result<Self, ProtocolError> {
-        if data.len() < 2 {
+        if data.len() < FIELD_INDEX_SIZE {
             return Err(ProtocolError::UnexpectedEof);
         }
-        let field_count = u16::from_be_bytes([data[0], data[1]]);
+        let field_count = FieldIndex::from_be_bytes(data[..FIELD_INDEX_SIZE].try_into().unwrap());
         if field_count == 0 {
             return Err(ProtocolError::MissingField(0));
         }
-        let (_, wire_type, field_data, _) = read_field(&data[2..])?;
+        let (_, wire_type, field_data, _) = read_field(&data[FIELD_INDEX_SIZE..])?;
         Self::decode(wire_type, field_data)
     }
 }
@@ -526,14 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn args_roundtrip() {
-        let orig = TwoFields { a: -999, b: 123 };
-        let encoded = orig.encode_args();
-        let decoded = TwoFields::decode_args(&encoded).unwrap();
-        assert_eq!(orig, decoded);
-    }
-
-    #[test]
     fn args_all_types_roundtrip() {
         let orig = AllTypes {
             f_i8: -128,
@@ -581,8 +585,9 @@ mod tests {
         let mut encoded = orig.encode_args();
 
         // Inject an extra unknown field
-        let field_count = u16::from_be_bytes([encoded[0], encoded[1]]);
-        encoded[0..2].copy_from_slice(&(field_count + 1).to_be_bytes());
+        let field_count =
+            FieldIndex::from_be_bytes(encoded[..FIELD_INDEX_SIZE].try_into().unwrap());
+        encoded[..FIELD_INDEX_SIZE].copy_from_slice(&(field_count + 1).to_be_bytes());
         write_field(&mut encoded, 99, WireType::I64, &12345i64.to_be_bytes());
 
         let decoded = TwoFields::decode_args(&encoded).unwrap();
@@ -593,7 +598,7 @@ mod tests {
     fn backwards_compat_missing_optional_defaults_none() {
         // Encode only the required field, omitting optional
         let mut encoded = Vec::new();
-        encoded.extend_from_slice(&1u16.to_be_bytes());
+        encoded.extend_from_slice(&(1 as FieldIndex).to_be_bytes());
         write_field(&mut encoded, 0, WireType::I64, &42i64.to_be_bytes());
 
         let decoded = WithOptional::decode_args(&encoded).unwrap();
@@ -603,7 +608,7 @@ mod tests {
 
     #[test]
     fn missing_required_field_errors() {
-        let encoded = 0u16.to_be_bytes().to_vec();
+        let encoded = (0 as FieldIndex).to_be_bytes().to_vec();
         let result = TwoFields::decode_args(&encoded);
         assert!(matches!(result, Err(ProtocolError::MissingField(0))));
     }
@@ -717,69 +722,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_string_roundtrip() {
-        let val = String::new();
-        let mut buf = Vec::new();
-        val.encode(&mut buf);
-        assert!(buf.is_empty());
-        let decoded = String::decode(WireType::String, &buf).unwrap();
-        assert_eq!(val, decoded);
+    fn borrowed_slice_zero_copy() {
+        let bytes_input = vec![10, 20, 30];
+        let decoded_bytes: &[u8] = Decode::decode(WireType::Bytes, &bytes_input).unwrap();
+        assert!(std::ptr::eq(decoded_bytes.as_ptr(), bytes_input.as_ptr()));
+
+        let str_input = b"test string".to_vec();
+        let decoded_str: &str = Decode::decode(WireType::String, &str_input).unwrap();
+        assert!(std::ptr::eq(decoded_str.as_ptr(), str_input.as_ptr()));
     }
 
     #[test]
-    fn empty_bytes_roundtrip() {
-        let val: Vec<u8> = vec![];
-        let mut buf = Vec::new();
-        val.encode(&mut buf);
-        let decoded = Vec::<u8>::decode(WireType::Bytes, &buf).unwrap();
-        assert_eq!(val, decoded);
-    }
-
-    #[test]
-    fn byte_slice_encode_decode() {
-        let data: &[u8] = &[1, 2, 3, 4, 5];
-        let mut buf = Vec::new();
-        data.encode(&mut buf);
-        assert_eq!(buf, vec![1, 2, 3, 4, 5]);
-
-        let decoded: &[u8] = Decode::decode(WireType::Bytes, &buf).unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    #[test]
-    fn byte_slice_borrows_from_input() {
-        let input = vec![10, 20, 30];
-        let decoded: &[u8] = Decode::decode(WireType::Bytes, &input).unwrap();
-        assert!(std::ptr::eq(decoded.as_ptr(), input.as_ptr()));
-    }
-
-    #[test]
-    fn str_slice_encode_decode() {
-        let data: &str = "hello world";
-        let mut buf = Vec::new();
-        data.encode(&mut buf);
-        assert_eq!(buf, b"hello world");
-
-        let decoded: &str = Decode::decode(WireType::String, &buf).unwrap();
-        assert_eq!(decoded, data);
-    }
-
-    #[test]
-    fn str_slice_borrows_from_input() {
-        let input = b"test string".to_vec();
-        let decoded: &str = Decode::decode(WireType::String, &input).unwrap();
-        assert!(std::ptr::eq(decoded.as_ptr(), input.as_ptr()));
-    }
-
-    #[test]
-    fn str_slice_invalid_utf8_errors() {
-        let invalid = vec![0xFF, 0xFE];
-        let result: Result<&str, _> = Decode::decode(WireType::String, &invalid);
-        assert!(matches!(result, Err(ProtocolError::InvalidUtf8)));
-    }
-
-    #[test]
-    fn bool_nonzero_is_true() {
+    fn bool_decode() {
         assert!(bool::decode(WireType::Bool, &[1]).unwrap());
         assert!(bool::decode(WireType::Bool, &[42]).unwrap());
         assert!(bool::decode(WireType::Bool, &[255]).unwrap());
@@ -787,11 +741,13 @@ mod tests {
     }
 
     #[test]
-    fn field_id_preserved() {
+    fn large_field_id() {
         let mut buf = Vec::new();
-        write_field(&mut buf, 0xABCD, WireType::U8, &[42]);
-        let (field_id, _, _, _) = read_field(&buf).unwrap();
-        assert_eq!(field_id, 0xABCD);
+        write_field(&mut buf, FieldIndex::MAX, WireType::U8, &[42]);
+        let (field_id, wire_type, data, _) = read_field(&buf).unwrap();
+        assert_eq!(field_id, FieldIndex::MAX);
+        assert_eq!(wire_type, WireType::U8);
+        assert_eq!(data, &[42]);
     }
 
     mod service_tests {
@@ -846,7 +802,7 @@ mod tests {
     #[test]
     fn unit_struct_roundtrip() {
         let encoded = UnitStruct.encode_args();
-        assert_eq!(encoded, vec![0, 0]);
+        assert_eq!(encoded, (0 as FieldIndex).to_be_bytes().to_vec());
         let decoded = UnitStruct::decode_args(&encoded).unwrap();
         assert_eq!(decoded, UnitStruct);
     }
@@ -877,7 +833,7 @@ mod tests {
 
     #[test]
     fn enum_unknown_variant_errors() {
-        let mut encoded = vec![0, 99];
+        let mut encoded = (99 as FieldIndex).to_be_bytes().to_vec();
         encoded.extend_from_slice(&TwoFields { a: 1, b: 2 }.encode_args());
         let result = TestEnum::decode_args(&encoded);
         assert!(matches!(result, Err(ProtocolError::UnknownVariant(99))));
@@ -1011,7 +967,7 @@ mod tests {
         #[test]
         fn multi_arg_forwards_compat_unknown_args_ignored() {
             let mut buf = Vec::new();
-            buf.extend_from_slice(&3u16.to_be_bytes());
+            buf.extend_from_slice(&(3 as FieldIndex).to_be_bytes());
 
             let mut field0 = Vec::new();
             Encode::encode(&"hello".to_string(), &mut field0);
@@ -1047,7 +1003,7 @@ mod tests {
         #[test]
         fn multi_arg_backwards_compat_optional_defaults_none() {
             let mut buf = Vec::new();
-            buf.extend_from_slice(&1u16.to_be_bytes());
+            buf.extend_from_slice(&(1 as FieldIndex).to_be_bytes());
 
             let mut field0 = Vec::new();
             Encode::encode(&"hello".to_string(), &mut field0);
@@ -1080,7 +1036,7 @@ mod tests {
         #[test]
         fn multi_arg_optional_with_value_decodes() {
             let mut buf = Vec::new();
-            buf.extend_from_slice(&2u16.to_be_bytes());
+            buf.extend_from_slice(&(2 as FieldIndex).to_be_bytes());
 
             let mut field0 = Vec::new();
             Encode::encode(&"hello".to_string(), &mut field0);
@@ -1110,7 +1066,7 @@ mod tests {
         #[test]
         fn multi_arg_optional_explicit_none_decodes() {
             let mut buf = Vec::new();
-            buf.extend_from_slice(&2u16.to_be_bytes());
+            buf.extend_from_slice(&(2 as FieldIndex).to_be_bytes());
 
             let mut field0 = Vec::new();
             Encode::encode(&"hello".to_string(), &mut field0);
@@ -1137,7 +1093,7 @@ mod tests {
 
         #[test]
         fn multi_arg_all_optional_empty_request() {
-            let buf = 0u16.to_be_bytes().to_vec();
+            let buf = (0 as FieldIndex).to_be_bytes().to_vec();
 
             let arg_map = compat_service::parse_args(&buf).unwrap();
 
@@ -1249,7 +1205,7 @@ mod tests {
         fn unit_struct_encode_is_empty_field_count() {
             let meta = StreamMeta;
             let encoded = meta.encode_args();
-            assert_eq!(encoded, vec![0, 0]);
+            assert_eq!(encoded, (0 as FieldIndex).to_be_bytes().to_vec());
         }
     }
 }

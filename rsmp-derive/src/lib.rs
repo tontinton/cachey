@@ -8,6 +8,8 @@ use syn::{
     parse_macro_input,
 };
 
+type FieldIndex = u16;
+
 #[proc_macro_derive(Args, attributes(field))]
 pub fn derive_args(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -25,7 +27,7 @@ pub fn derive_args(input: TokenStream) -> TokenStream {
 
 struct FieldInfo {
     name: syn::Ident,
-    idx: u16,
+    idx: FieldIndex,
     ty: Type,
     is_option: bool,
 }
@@ -42,7 +44,7 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
         return Ok(quote! {
             impl rsmp::Args for #name {
                 fn encode_args(&self) -> Vec<u8> {
-                    0u16.to_be_bytes().to_vec()
+                    (0 as rsmp::FieldIndex).to_be_bytes().to_vec()
                 }
 
                 fn decode_args(_data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
@@ -90,7 +92,7 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let field_type = field.ty.clone();
         let is_option = is_option_type(&field_type);
 
-        let mut field_idx: Option<u16> = None;
+        let mut field_idx: Option<FieldIndex> = None;
 
         for attr in &field.attrs {
             if attr.path().is_ident("field") {
@@ -137,7 +139,7 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         rsmp::Encode::encode(v, &mut field_data);
                         rsmp::write_field(
                             &mut buf,
-                            #idx,
+                            #idx as rsmp::FieldIndex,
                             rsmp::Encode::wire_type(v),
                             &field_data,
                         );
@@ -145,7 +147,7 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     None => {
                         rsmp::write_field(
                             &mut buf,
-                            #idx,
+                            #idx as rsmp::FieldIndex,
                             rsmp::WireType::None,
                             &[],
                         );
@@ -159,7 +161,7 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     rsmp::Encode::encode(&self.#name, &mut field_data);
                     rsmp::write_field(
                         &mut buf,
-                        #idx,
+                        #idx as rsmp::FieldIndex,
                         rsmp::Encode::wire_type(&self.#name),
                         &field_data,
                     );
@@ -214,29 +216,32 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
             quote! { #name: #var_name }
         } else {
             quote! {
-                #name: #var_name.ok_or(rsmp::ProtocolError::MissingField(#idx))?
+                #name: #var_name.ok_or(rsmp::ProtocolError::MissingField(#idx as rsmp::FieldIndex))?
             }
         }
     });
 
-    let field_count = field_info.len() as u16;
+    let field_count = field_info.len();
 
     Ok(quote! {
         impl rsmp::Args for #name {
             fn encode_args(&self) -> Vec<u8> {
                 let mut buf = Vec::new();
-                buf.extend_from_slice(&(#field_count as u16).to_be_bytes());
+                buf.extend_from_slice(&(#field_count as rsmp::FieldIndex).to_be_bytes());
                 #(#encode_fields)*
                 buf
             }
 
             fn decode_args(data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
-                if data.len() < 2 {
+                const FIELD_INDEX_SIZE: usize = std::mem::size_of::<rsmp::FieldIndex>();
+                if data.len() < FIELD_INDEX_SIZE {
                     return Err(rsmp::ProtocolError::UnexpectedEof);
                 }
 
-                let field_count = u16::from_be_bytes([data[0], data[1]]);
-                let mut offset = 2usize;
+                let field_count = rsmp::FieldIndex::from_be_bytes(
+                    data[..FIELD_INDEX_SIZE].try_into().unwrap()
+                );
+                let mut offset = FIELD_INDEX_SIZE;
 
                 #(#decode_vars)*
 
@@ -296,7 +301,7 @@ fn extract_option_inner(ty: &Type) -> TokenStream2 {
 
 struct VariantInfo {
     name: syn::Ident,
-    idx: u16,
+    idx: FieldIndex,
     inner_ty: Type,
 }
 
@@ -323,7 +328,7 @@ fn impl_args_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         };
 
-        let mut variant_idx: Option<u16> = None;
+        let mut variant_idx: Option<FieldIndex> = None;
 
         for attr in &variant.attrs {
             if attr.path().is_ident("field") {
@@ -363,7 +368,7 @@ fn impl_args_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let idx = v.idx;
         quote! {
             Self::#vname(inner) => {
-                buf.extend_from_slice(&(#idx as u16).to_be_bytes());
+                buf.extend_from_slice(&(#idx as rsmp::FieldIndex).to_be_bytes());
                 buf.extend_from_slice(&rsmp::Args::encode_args(inner));
             }
         }
@@ -374,7 +379,7 @@ fn impl_args_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let idx = v.idx;
         let ty = &v.inner_ty;
         quote! {
-            #idx => Ok(Self::#vname(<#ty as rsmp::Args>::decode_args(&data[2..])?)),
+            #idx => Ok(Self::#vname(<#ty as rsmp::Args>::decode_args(&data[FIELD_INDEX_SIZE..])?)),
         }
     });
 
@@ -389,10 +394,13 @@ fn impl_args_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
 
             fn decode_args(data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
-                if data.len() < 2 {
+                const FIELD_INDEX_SIZE: usize = std::mem::size_of::<rsmp::FieldIndex>();
+                if data.len() < FIELD_INDEX_SIZE {
                     return Err(rsmp::ProtocolError::UnexpectedEof);
                 }
-                let variant_id = u16::from_be_bytes([data[0], data[1]]);
+                let variant_id = rsmp::FieldIndex::from_be_bytes(
+                    data[..FIELD_INDEX_SIZE].try_into().unwrap()
+                );
                 match variant_id {
                     #(#decode_arms)*
                     _ => Err(rsmp::ProtocolError::UnknownVariant(variant_id)),
@@ -751,11 +759,10 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 .map(|(i, a)| {
                     let var_name = format_ident!("__arg_{}", i);
                     let ty = &a.ty;
-                    let i = i as u16;
                     if a.is_option {
                         let inner_ty = extract_option_inner(ty);
                         quote! {
-                            let #var_name: #ty = __arg_map.get(&#i)
+                            let #var_name: #ty = __arg_map.get(&(#i as rsmp::FieldIndex))
                                 .map(|(wt, data)| {
                                     if *wt == rsmp::WireType::None {
                                         Ok(None)
@@ -768,8 +775,8 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                         }
                     } else {
                         quote! {
-                            let #var_name: #ty = __arg_map.get(&#i)
-                                .ok_or(rsmp::ProtocolError::MissingField(#i))
+                            let #var_name: #ty = __arg_map.get(&(#i as rsmp::FieldIndex))
+                                .ok_or(rsmp::ProtocolError::MissingField(#i as rsmp::FieldIndex))
                                 .and_then(|(wt, data)| <#ty as rsmp::Decode<'_>>::decode(*wt, data))?;
                         }
                     }
@@ -934,17 +941,16 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 .enumerate()
                 .map(|(i, a)| {
                     let name = &a.name;
-                    let i = i as u16;
                     if a.is_option {
                         quote! {
                             match #name {
                                 Some(v) => {
                                     let mut __field_data = Vec::new();
                                     rsmp::Encode::encode(v, &mut __field_data);
-                                    rsmp::write_field(&mut __buf, #i, rsmp::Encode::wire_type(v), &__field_data);
+                                    rsmp::write_field(&mut __buf, #i as rsmp::FieldIndex, rsmp::Encode::wire_type(v), &__field_data);
                                 }
                                 None => {
-                                    rsmp::write_field(&mut __buf, #i, rsmp::WireType::None, &[]);
+                                    rsmp::write_field(&mut __buf, #i as rsmp::FieldIndex, rsmp::WireType::None, &[]);
                                 }
                             }
                         }
@@ -953,18 +959,18 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                             {
                                 let mut __field_data = Vec::new();
                                 rsmp::Encode::encode(#name, &mut __field_data);
-                                rsmp::write_field(&mut __buf, #i, rsmp::Encode::wire_type(#name), &__field_data);
+                                rsmp::write_field(&mut __buf, #i as rsmp::FieldIndex, rsmp::Encode::wire_type(#name), &__field_data);
                             }
                         }
                     }
                 })
                 .collect();
 
-            let field_count = m.args.len() as u16;
+            let field_count = m.args.len();
 
             let encode_block = quote! {
                 let mut __buf = Vec::new();
-                __buf.extend_from_slice(&(#field_count as u16).to_be_bytes());
+                __buf.extend_from_slice(&(#field_count as rsmp::FieldIndex).to_be_bytes());
                 #(#encode_args)*
             };
 
@@ -1123,12 +1129,15 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 }
             }
 
-            pub fn parse_args(__data: &[u8]) -> Result<std::collections::HashMap<u16, (rsmp::WireType, &[u8])>, rsmp::ProtocolError> {
-                if __data.len() < 2 {
+            pub fn parse_args(__data: &[u8]) -> Result<std::collections::HashMap<rsmp::FieldIndex, (rsmp::WireType, &[u8])>, rsmp::ProtocolError> {
+                const FIELD_INDEX_SIZE: usize = std::mem::size_of::<rsmp::FieldIndex>();
+                if __data.len() < FIELD_INDEX_SIZE {
                     return Err(rsmp::ProtocolError::UnexpectedEof);
                 }
-                let field_count = u16::from_be_bytes([__data[0], __data[1]]);
-                let mut offset = 2usize;
+                let field_count = rsmp::FieldIndex::from_be_bytes(
+                    __data[..FIELD_INDEX_SIZE].try_into().unwrap()
+                );
+                let mut offset = FIELD_INDEX_SIZE;
                 let mut map = std::collections::HashMap::new();
                 for _ in 0..field_count {
                     let (idx, wire_type, bytes, consumed) = rsmp::read_field(&__data[offset..])?;
