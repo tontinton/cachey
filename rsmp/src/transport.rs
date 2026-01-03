@@ -1,3 +1,4 @@
+use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -221,8 +222,6 @@ impl<'a, S: AsyncRead + Unpin> AsyncRead for TakeReader<'a, S> {
 }
 
 async fn write_all<W: AsyncWrite + Unpin>(writer: &mut W, mut buf: &[u8]) -> io::Result<()> {
-    use std::future::poll_fn;
-
     while !buf.is_empty() {
         let n = poll_fn(|cx| Pin::new(&mut *writer).poll_write(cx, buf)).await?;
         if n == 0 {
@@ -238,8 +237,6 @@ async fn write_all<W: AsyncWrite + Unpin>(writer: &mut W, mut buf: &[u8]) -> io:
 }
 
 async fn read_exact<R: AsyncRead + Unpin>(reader: &mut R, mut buf: &mut [u8]) -> io::Result<()> {
-    use std::future::poll_fn;
-
     while !buf.is_empty() {
         let n = poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, buf)).await?;
         if n == 0 {
@@ -257,6 +254,5 @@ async fn read_some<R: AsyncRead + Unpin + ?Sized>(
     reader: &mut R,
     buf: &mut [u8],
 ) -> io::Result<usize> {
-    use std::future::poll_fn;
     poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, buf)).await
 }
