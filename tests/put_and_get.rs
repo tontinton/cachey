@@ -86,7 +86,7 @@ async fn run_client_test<T: Transport>(client: &mut CacheServiceClient<T>) {
         .await
         .unwrap();
 
-    let (_header, mut body) = client
+    let mut body = client
         .get(&"test-file".to_string(), &0u64, &(TEST_DATA.len() as u64))
         .await
         .unwrap();

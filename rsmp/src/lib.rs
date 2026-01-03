@@ -212,6 +212,12 @@ pub trait Transport {
         args_data: &[u8],
     ) -> Result<Result<BoxAsyncRead<'a>, Vec<u8>>, TransportError>;
 
+    async fn call_with_response_and_stream_raw<'a>(
+        &'a mut self,
+        method_id: u16,
+        args_data: &[u8],
+    ) -> Result<Result<(Vec<u8>, BoxAsyncRead<'a>), Vec<u8>>, TransportError>;
+
     async fn call_with_body_and_response_stream_raw<'a>(
         &'a mut self,
         method_id: u16,
@@ -1171,6 +1177,79 @@ mod tests {
             resp.encode(&mut buf);
             let decoded = CompatResponse::decode(WireType::Bytes, &buf).unwrap();
             assert_eq!(resp, decoded);
+        }
+    }
+
+    mod empty_response_tests {
+        use super::*;
+
+        #[derive(Args, Debug, PartialEq, Clone)]
+        struct TestResponse {
+            #[field(idx = 0)]
+            value: i64,
+        }
+
+        #[derive(Args, Debug, PartialEq, Clone)]
+        struct StreamMeta;
+
+        #[service]
+        pub trait EmptyResponseService {
+            async fn no_response(&self, x: u64);
+            async fn with_response(&self, x: u64) -> TestResponse;
+            async fn stream_only(&self, x: u64) -> Stream;
+            async fn stream_with_response(&self, x: u64) -> (StreamMeta, Stream);
+            async fn request_stream_no_response(&self, x: u64, body: Stream);
+            async fn request_stream_with_response(&self, x: u64, body: Stream) -> TestResponse;
+        }
+
+        #[test]
+        fn empty_response_method_ids_generated() {
+            assert_eq!(empty_response_service::NO_RESPONSE, 0);
+            assert_eq!(empty_response_service::WITH_RESPONSE, 1);
+            assert_eq!(empty_response_service::STREAM_ONLY, 2);
+            assert_eq!(empty_response_service::STREAM_WITH_RESPONSE, 3);
+            assert_eq!(empty_response_service::REQUEST_STREAM_NO_RESPONSE, 4);
+            assert_eq!(empty_response_service::REQUEST_STREAM_WITH_RESPONSE, 5);
+        }
+
+        #[test]
+        fn has_request_stream_correct() {
+            assert!(!empty_response_service::has_request_stream(0));
+            assert!(!empty_response_service::has_request_stream(1));
+            assert!(!empty_response_service::has_request_stream(2));
+            assert!(!empty_response_service::has_request_stream(3));
+            assert!(empty_response_service::has_request_stream(4));
+            assert!(empty_response_service::has_request_stream(5));
+        }
+
+        #[test]
+        fn test_response_roundtrip() {
+            let resp = TestResponse { value: 42 };
+            let mut buf = Vec::new();
+            resp.encode(&mut buf);
+            let decoded = TestResponse::decode(WireType::Bytes, &buf).unwrap();
+            assert_eq!(resp, decoded);
+        }
+
+        #[test]
+        fn unit_struct_default_impl() {
+            let meta: StreamMeta = Default::default();
+            assert_eq!(meta, StreamMeta);
+        }
+
+        #[test]
+        fn unit_struct_args_roundtrip() {
+            let meta = StreamMeta;
+            let encoded = meta.encode_args();
+            let decoded = StreamMeta::decode_args(&encoded).unwrap();
+            assert_eq!(meta, decoded);
+        }
+
+        #[test]
+        fn unit_struct_encode_is_empty_field_count() {
+            let meta = StreamMeta;
+            let encoded = meta.encode_args();
+            assert_eq!(encoded, vec![0, 0]);
         }
     }
 }

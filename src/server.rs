@@ -17,10 +17,7 @@ use tracing::{debug, error, info};
 
 use crate::cache::Cache;
 use crate::metrics::METRICS;
-use crate::proto::{
-    CacheError, CacheServiceHandlerLocal, GetResponse, NotFoundError, SuccessResponse,
-    cache_service,
-};
+use crate::proto::{CacheError, CacheServiceHandlerLocal, NotFoundError, cache_service};
 use crate::{BufResultExt, create_listener};
 
 const STREAM_FILE_BUF_SIZE: usize = 64 * 1024;
@@ -65,7 +62,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         offset: u64,
         size: u64,
         stream: &mut TcpStreamCompat,
-    ) -> Result<(GetResponse, u64), CacheError> {
+    ) -> Result<u64, CacheError> {
         let timer = METRICS.request_duration.start_timer();
 
         let path = match self.cache.get(&id) {
@@ -117,7 +114,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
             .inc_by(size);
         timer.observe_duration();
 
-        Ok((GetResponse, size))
+        Ok(size)
     }
 
     async fn put(
@@ -125,7 +122,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         id: String,
         stream: &mut TcpStreamCompat,
         size: u64,
-    ) -> Result<SuccessResponse, CacheError> {
+    ) -> Result<(), CacheError> {
         let timer = METRICS.request_duration.start_timer();
 
         let path = self.cache.generate_path(&id);
@@ -163,7 +160,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
             .inc_by(size);
         timer.observe_duration();
 
-        Ok(SuccessResponse)
+        Ok(())
     }
 }
 

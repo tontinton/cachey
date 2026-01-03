@@ -1,12 +1,6 @@
 use rsmp::prelude::*;
 
 #[derive(Args, Debug)]
-pub struct SuccessResponse;
-
-#[derive(Args, Debug)]
-pub struct GetResponse;
-
-#[derive(Args, Debug)]
 pub struct NotFoundError {
     #[field(idx = 0)]
     pub id: String,
@@ -36,6 +30,6 @@ impl From<std::io::Error> for CacheError {
 
 #[rsmp::service(error = CacheError)]
 pub trait CacheService {
-    async fn get(&self, id: String, offset: u64, size: u64) -> (GetResponse, Stream);
-    async fn put(&self, id: String, body: Stream) -> SuccessResponse;
+    async fn get(&self, id: String, offset: u64, size: u64) -> Stream;
+    async fn put(&self, id: String, body: Stream);
 }

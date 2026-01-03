@@ -132,6 +132,31 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport for StreamTransport<S> {
         Ok(Ok(stream_reader))
     }
 
+    async fn call_with_response_and_stream_raw<'a>(
+        &'a mut self,
+        method_id: u16,
+        args_data: &[u8],
+    ) -> Result<Result<(Vec<u8>, BoxAsyncRead<'a>), Vec<u8>>, TransportError> {
+        self.write_frame(method_id, args_data).await?;
+
+        let response = match self.read_response().await? {
+            Response::Ok(data) => data,
+            Response::Err(err) => return Ok(Err(err)),
+        };
+
+        let mut size_buf = [0u8; 8];
+        read_exact(&mut self.stream, &mut size_buf).await?;
+        let response_size = u64::from_be_bytes(size_buf);
+
+        if response_size == ERROR_MARKER {
+            return Ok(Err(self.read_error().await?));
+        }
+
+        let stream_reader: BoxAsyncRead<'a> =
+            Box::pin(TakeReader::new(&mut self.stream, response_size));
+        Ok(Ok((response, stream_reader)))
+    }
+
     async fn call_with_body_and_response_stream_raw<'a>(
         &'a mut self,
         method_id: u16,
