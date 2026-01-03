@@ -117,3 +117,35 @@ impl Cache {
         self.inner.misses()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eviction_sends_to_cleanup_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cache, rx) = Cache::new(dir.path().to_path_buf(), 100);
+
+        cache.insert("a".into(), 60);
+        cache.insert("b".into(), 60);
+
+        let evicted = rx.try_recv().unwrap();
+        assert!(evicted.ends_with("a"));
+    }
+
+    #[test]
+    fn tracks_hits_and_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cache, _rx) = Cache::new(dir.path().to_path_buf(), 1000);
+
+        cache.get(&"x".into());
+        cache.get(&"y".into());
+        assert_eq!(cache.misses(), 2);
+
+        cache.insert("x".into(), 10);
+        cache.get(&"x".into());
+        cache.get(&"x".into());
+        assert_eq!(cache.hits(), 2);
+    }
+}
