@@ -73,26 +73,14 @@ pub struct CacheHandler {
     pub cache: Arc<Cache>,
 }
 
-#[rsmp::local_handler]
-impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
-    async fn get(
+impl CacheHandler {
+    async fn stream_file(
         &self,
-        id: String,
+        file: &File,
+        stream: &mut TcpStreamCompat,
         offset: u64,
         size: u64,
-        stream: &mut TcpStreamCompat,
-    ) -> Result<u64, CacheError> {
-        let path = match self.cache.get(&id) {
-            Some(p) => p,
-            None => {
-                debug!(shard_id = self.shard_id, id, "not found");
-                return Err(CacheError::NotFound(NotFoundError { id }));
-            }
-        };
-
-        debug!(shard_id = self.shard_id, id, ?path, "found");
-
-        let file = File::open(&path).await?;
+    ) -> io::Result<()> {
         stream
             .0
             .write_all(size.to_be_bytes().to_vec())
@@ -116,6 +104,57 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
             current_offset += n as u64;
         }
 
+        Ok(())
+    }
+
+    async fn stream_to_file(
+        &self,
+        stream: &mut TcpStreamCompat,
+        file: &mut File,
+        size: u64,
+    ) -> io::Result<()> {
+        let mut file_offset = 0u64;
+        let mut buf = Vec::with_capacity(STREAM_FILE_BUF_SIZE);
+
+        while file_offset < size {
+            let (n, read_buf) = stream.0.read(buf).await.result()?;
+            if n == 0 {
+                break;
+            }
+            buf = read_buf;
+            let slice = buf.slice(..n);
+            let ((), slice) = file.write_all_at(slice, file_offset).await.result()?;
+            buf = slice.into_inner();
+            buf.clear();
+            file_offset += n as u64;
+        }
+
+        Ok(())
+    }
+}
+
+#[rsmp::local_handler]
+impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
+    async fn get(
+        &self,
+        id: String,
+        offset: u64,
+        size: u64,
+        stream: &mut TcpStreamCompat,
+    ) -> Result<u64, CacheError> {
+        let path = match self.cache.get(&id) {
+            Some(p) => p,
+            None => {
+                debug!(shard_id = self.shard_id, id, "not found");
+                return Err(CacheError::NotFound(NotFoundError { id }));
+            }
+        };
+
+        debug!(shard_id = self.shard_id, id, ?path, "found");
+
+        let file = File::open(&path).await?;
+        self.stream_file(&file, stream, offset, size).await?;
+
         METRICS
             .bytes_read_total
             .with_label_values(&["get"])
@@ -135,21 +174,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         debug!(shard_id = self.shard_id, id, ?path, "writing");
 
         let mut file = File::create(&path).await?;
-        let mut file_offset = 0u64;
-        let mut buf = Vec::with_capacity(STREAM_FILE_BUF_SIZE);
-
-        while file_offset < size {
-            let (n, read_buf) = stream.0.read(buf).await.result()?;
-            if n == 0 {
-                break;
-            }
-            buf = read_buf;
-            let slice = buf.slice(..n);
-            let ((), slice) = file.write_all_at(slice, file_offset).await.result()?;
-            buf = slice.into_inner();
-            buf.clear();
-            file_offset += n as u64;
-        }
+        self.stream_to_file(stream, &mut file, size).await?;
 
         self.cache.insert(id, size);
 
