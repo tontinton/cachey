@@ -49,6 +49,7 @@ pub enum WireType {
     Bool = 11,
     String = 12,
     Bytes = 13,
+    Array = 14,
 }
 
 pub trait Encode {
@@ -503,6 +504,146 @@ impl<'a> Decode<'a> for &'a str {
             return Err(ProtocolError::InvalidWireType(wire_type as u8));
         }
         std::str::from_utf8(data).map_err(|_| ProtocolError::InvalidUtf8)
+    }
+}
+
+use std::ops::Range;
+
+impl<T: Encode> Encode for Range<T> {
+    fn encode(&self, buf: &mut Vec<u8>) {
+        self.start.encode(buf);
+        self.end.encode(buf);
+    }
+
+    fn wire_type(&self) -> WireType {
+        WireType::Bytes
+    }
+}
+
+macro_rules! impl_range {
+    ($t:ty, $size:expr) => {
+        impl Decode<'_> for Range<$t> {
+            fn decode(wire_type: WireType, data: &[u8]) -> Result<Self, ProtocolError> {
+                if wire_type != WireType::Bytes {
+                    return Err(ProtocolError::InvalidWireType(wire_type as u8));
+                }
+                if data.len() < $size * 2 {
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+                let start = <$t>::from_be_bytes(data[..$size].try_into().unwrap());
+                let end = <$t>::from_be_bytes(data[$size..$size * 2].try_into().unwrap());
+                Ok(start..end)
+            }
+        }
+
+        impl Args for Range<$t> {
+            fn encode_args(&self) -> Vec<u8> {
+                let mut buf = Vec::new();
+                buf.extend_from_slice(&(1 as FieldIndex).to_be_bytes());
+                let mut field_data = Vec::new();
+                self.encode(&mut field_data);
+                write_field(&mut buf, 0, self.wire_type(), &field_data);
+                buf
+            }
+
+            fn decode_args(data: &[u8]) -> Result<Self, ProtocolError> {
+                if data.len() < FIELD_INDEX_SIZE {
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+                let field_count =
+                    FieldIndex::from_be_bytes(data[..FIELD_INDEX_SIZE].try_into().unwrap());
+                if field_count == 0 {
+                    return Err(ProtocolError::MissingField(0));
+                }
+                let (_, wire_type, field_data, _) = read_field(&data[FIELD_INDEX_SIZE..])?;
+                Self::decode(wire_type, field_data)
+            }
+        }
+    };
+}
+
+impl_range!(i8, 1);
+impl_range!(u8, 1);
+impl_range!(i16, 2);
+impl_range!(u16, 2);
+impl_range!(i32, 4);
+impl_range!(u32, 4);
+impl_range!(i64, 8);
+impl_range!(u64, 8);
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Array<T>(pub Vec<T>);
+
+impl<T> Array<T> {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn into_inner(self) -> Vec<T> {
+        self.0
+    }
+}
+
+impl<T> From<Vec<T>> for Array<T> {
+    fn from(v: Vec<T>) -> Self {
+        Self(v)
+    }
+}
+
+impl<T> std::ops::Deref for Array<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for Array<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T: Args> Encode for Array<T> {
+    fn encode(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&(self.0.len() as u32).to_be_bytes());
+        for item in &self.0 {
+            let encoded = item.encode_args();
+            buf.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&encoded);
+        }
+    }
+
+    fn wire_type(&self) -> WireType {
+        WireType::Array
+    }
+}
+
+impl<T: Args> Decode<'_> for Array<T> {
+    fn decode(wire_type: WireType, data: &[u8]) -> Result<Self, ProtocolError> {
+        if wire_type != WireType::Array {
+            return Err(ProtocolError::InvalidWireType(wire_type as u8));
+        }
+        if data.len() < 4 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let count = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+        let mut result = Vec::with_capacity(count);
+        let mut offset = 4;
+        for _ in 0..count {
+            if data.len() < offset + 4 {
+                return Err(ProtocolError::UnexpectedEof);
+            }
+            let item_len =
+                u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            if data.len() < offset + item_len {
+                return Err(ProtocolError::UnexpectedEof);
+            }
+            let item = T::decode_args(&data[offset..offset + item_len])?;
+            result.push(item);
+            offset += item_len;
+        }
+        Ok(Self(result))
     }
 }
 
@@ -1225,6 +1366,42 @@ mod tests {
             let meta = StreamMeta;
             let encoded = meta.encode_args();
             assert_eq!(encoded, (0 as FieldIndex).to_be_bytes().to_vec());
+        }
+    }
+
+    mod array_tests {
+        use super::*;
+
+        #[test]
+        fn array_of_ranges_roundtrip() {
+            let range = 0u64..100;
+            let range_encoded = range.encode_args();
+            let range_decoded = Range::<u64>::decode_args(&range_encoded).unwrap();
+            assert_eq!(range, range_decoded);
+
+            let arr: Array<Range<u64>> = vec![0u64..100, 500..600, 1000..2000].into();
+            let mut buf = Vec::new();
+            arr.encode(&mut buf);
+            let decoded = Array::<Range<u64>>::decode(WireType::Array, &buf).unwrap();
+            assert_eq!(arr, decoded);
+        }
+
+        #[test]
+        fn empty_array_roundtrip() {
+            let arr: Array<Range<u64>> = vec![].into();
+            let mut buf = Vec::new();
+            arr.encode(&mut buf);
+            let decoded = Array::<Range<u64>>::decode(WireType::Array, &buf).unwrap();
+            assert_eq!(arr, decoded);
+        }
+
+        #[test]
+        fn array_of_u64_roundtrip() {
+            let arr: Array<u64> = vec![1, 2, 3, u64::MAX].into();
+            let mut buf = Vec::new();
+            arr.encode(&mut buf);
+            let decoded = Array::<u64>::decode(WireType::Array, &buf).unwrap();
+            assert_eq!(arr, decoded);
         }
     }
 }

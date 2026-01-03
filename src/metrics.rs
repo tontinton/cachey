@@ -5,12 +5,12 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::runtime::spawn;
 use prometheus::{
-    Histogram, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder, register_histogram,
-    register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+    Histogram, IntCounterVec, IntGaugeVec, TextEncoder, register_histogram,
+    register_int_counter_vec, register_int_gauge_vec,
 };
 use tracing::{debug, error};
 
-use crate::cache::Cache;
+use crate::cache::{DiskCache, MemoryCache};
 use crate::{BufResultExt, create_listener};
 
 pub static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::default);
@@ -25,12 +25,12 @@ pub struct Metrics {
     pub active_connections: IntGaugeVec,
     pub request_duration: Histogram,
 
-    // Cache metrics
-    pub cache_items: IntGauge,
-    pub cache_weight_bytes: IntGauge,
-    pub cache_capacity_bytes: IntGauge,
-    pub cache_hits_total: IntGauge,
-    pub cache_misses_total: IntGauge,
+    // Cache metrics (labeled by "type": "disk" or "memory")
+    pub cache_items: IntGaugeVec,
+    pub cache_weight_bytes: IntGaugeVec,
+    pub cache_capacity_bytes: IntGaugeVec,
+    pub cache_hits_total: IntGaugeVec,
+    pub cache_misses_total: IntGaugeVec,
 }
 
 impl Default for Metrics {
@@ -70,30 +70,38 @@ impl Default for Metrics {
             )
             .expect("create request_duration"),
 
-            cache_items: register_int_gauge!("cachey_cache_items", "Number of items in cache")
-                .expect("create cache_items"),
+            cache_items: register_int_gauge_vec!(
+                "cachey_cache_items",
+                "Number of items in cache",
+                &["type"]
+            )
+            .expect("create cache_items"),
 
-            cache_weight_bytes: register_int_gauge!(
+            cache_weight_bytes: register_int_gauge_vec!(
                 "cachey_cache_weight_bytes",
-                "Total weight of cached items in bytes"
+                "Total weight of cached items in bytes",
+                &["type"]
             )
             .expect("create cache_weight_bytes"),
 
-            cache_capacity_bytes: register_int_gauge!(
+            cache_capacity_bytes: register_int_gauge_vec!(
                 "cachey_cache_capacity_bytes",
-                "Maximum cache capacity in bytes"
+                "Maximum cache capacity in bytes",
+                &["type"]
             )
             .expect("create cache_capacity_bytes"),
 
-            cache_hits_total: register_int_gauge!(
+            cache_hits_total: register_int_gauge_vec!(
                 "cachey_cache_hits_total",
-                "Total number of cache hits"
+                "Total number of cache hits",
+                &["type"]
             )
             .expect("create cache_hits_total"),
 
-            cache_misses_total: register_int_gauge!(
+            cache_misses_total: register_int_gauge_vec!(
                 "cachey_cache_misses_total",
-                "Total number of cache misses"
+                "Total number of cache misses",
+                &["type"]
             )
             .expect("create cache_misses_total"),
         }
@@ -101,17 +109,43 @@ impl Default for Metrics {
 }
 
 impl Metrics {
-    fn update_cache_stats(&self, cache: &Cache) {
-        self.cache_items.set(cache.len() as i64);
-        self.cache_weight_bytes.set(cache.weight() as i64);
-        self.cache_capacity_bytes.set(cache.capacity() as i64);
-        self.cache_hits_total.set(cache.hits() as i64);
-        self.cache_misses_total.set(cache.misses() as i64);
+    fn update_cache_stats(&self, disk_cache: &DiskCache, memory_cache: &MemoryCache) {
+        self.cache_items
+            .with_label_values(&["disk"])
+            .set(disk_cache.len() as i64);
+        self.cache_weight_bytes
+            .with_label_values(&["disk"])
+            .set(disk_cache.weight() as i64);
+        self.cache_capacity_bytes
+            .with_label_values(&["disk"])
+            .set(disk_cache.capacity() as i64);
+        self.cache_hits_total
+            .with_label_values(&["disk"])
+            .set(disk_cache.hits() as i64);
+        self.cache_misses_total
+            .with_label_values(&["disk"])
+            .set(disk_cache.misses() as i64);
+
+        self.cache_items
+            .with_label_values(&["memory"])
+            .set(memory_cache.len() as i64);
+        self.cache_weight_bytes
+            .with_label_values(&["memory"])
+            .set(memory_cache.weight() as i64);
+        self.cache_capacity_bytes
+            .with_label_values(&["memory"])
+            .set(memory_cache.capacity() as i64);
+        self.cache_hits_total
+            .with_label_values(&["memory"])
+            .set(memory_cache.hits() as i64);
+        self.cache_misses_total
+            .with_label_values(&["memory"])
+            .set(memory_cache.misses() as i64);
     }
 }
 
-fn render(cache: &Cache) -> String {
-    METRICS.update_cache_stats(cache);
+fn render(disk_cache: &DiskCache, memory_cache: &MemoryCache) -> String {
+    METRICS.update_cache_stats(disk_cache, memory_cache);
 
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
@@ -120,7 +154,11 @@ fn render(cache: &Cache) -> String {
         .unwrap_or_default()
 }
 
-async fn handle_metrics_request(mut stream: TcpStream, cache: Arc<Cache>) {
+async fn handle_metrics_request(
+    mut stream: TcpStream,
+    disk_cache: Arc<DiskCache>,
+    memory_cache: Arc<MemoryCache>,
+) {
     let buf = vec![0u8; 1024];
     let Ok((n, buf)) = stream.read(buf).await.result() else {
         return;
@@ -134,7 +172,7 @@ async fn handle_metrics_request(mut stream: TcpStream, cache: Arc<Cache>) {
     let is_metrics_request = request.starts_with("GET /metrics") || request.starts_with("GET / ");
 
     let response = if is_metrics_request {
-        let body = render(&cache);
+        let body = render(&disk_cache, &memory_cache);
         format!(
             "HTTP/1.1 200 OK\r\n\
              Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\
@@ -156,7 +194,12 @@ async fn handle_metrics_request(mut stream: TcpStream, cache: Arc<Cache>) {
     let _ = stream.write_all(response.into_bytes().slice(..)).await;
 }
 
-pub async fn serve_metrics(shard_id: usize, listen: String, cache: Arc<Cache>) {
+pub async fn serve_metrics(
+    shard_id: usize,
+    listen: String,
+    disk_cache: Arc<DiskCache>,
+    memory_cache: Arc<MemoryCache>,
+) {
     let listener = match create_listener(&listen, METRICS_SERVER_NUM_LISTENERS) {
         Ok(l) => l,
         Err(e) => {
@@ -170,8 +213,9 @@ pub async fn serve_metrics(shard_id: usize, listen: String, cache: Arc<Cache>) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                let cache = Arc::clone(&cache);
-                spawn(handle_metrics_request(stream, cache)).detach();
+                let disk_cache = Arc::clone(&disk_cache);
+                let memory_cache = Arc::clone(&memory_cache);
+                spawn(handle_metrics_request(stream, disk_cache, memory_cache)).detach();
             }
             Err(e) => {
                 error!(shard_id, "Metrics accept error: {e}");

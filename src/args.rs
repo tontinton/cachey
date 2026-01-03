@@ -26,6 +26,10 @@ pub struct Args {
     #[clap(long, value_parser = parse_bytes, default_value = "1GiB")]
     pub disk_cache_size: ByteSize,
 
+    /// Memory cache size for hot chunks.
+    #[clap(long, value_parser = parse_bytes, default_value = "128MiB")]
+    pub memory_cache_size: ByteSize,
+
     /// Metrics listen address (host:port).
     #[clap(long, default_value = "0.0.0.0:9090")]
     pub metrics_listen: String,

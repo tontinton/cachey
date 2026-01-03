@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::thread;
 
 use async_broadcast::broadcast;
-use cachey::cache::{Cache, CleanupReceiver, run_cleanup_loop};
+use cachey::cache::{CleanupReceiver, DiskCache, MemoryCache, run_cleanup_loop};
 use cachey::metrics;
 use cachey::{
     args::{Args, parse_args},
@@ -35,7 +35,8 @@ fn pin_to_core(_core_id: usize) {}
 fn run_shard(
     shard_id: usize,
     args: Args,
-    cache: Arc<Cache>,
+    disk_cache: Arc<DiskCache>,
+    memory_cache: Arc<MemoryCache>,
     shutdown_tx: Option<async_broadcast::Sender<()>>,
     shutdown_rx: async_broadcast::Receiver<()>,
     cleanup_rx: CleanupReceiver,
@@ -50,11 +51,18 @@ fn run_shard(
         spawn(metrics::serve_metrics(
             shard_id,
             args.metrics_listen.clone(),
-            Arc::clone(&cache),
+            Arc::clone(&disk_cache),
+            Arc::clone(&memory_cache),
         ))
         .detach();
 
-        let serve = pin!(server::serve_shard(shard_id, args, cache, shutdown_rx));
+        let serve = pin!(server::serve_shard(
+            shard_id,
+            args,
+            disk_cache,
+            memory_cache,
+            shutdown_rx
+        ));
 
         if let Some(shutdown_tx) = shutdown_tx {
             #[cfg(unix)]
@@ -95,23 +103,44 @@ fn main() -> eyre::Result<()> {
     info!(?args, num_shards, "Init");
 
     let (shutdown_tx, shutdown_rx) = broadcast::<()>(1);
-    let (cache, cleanup_rx) = Cache::new(args.disk_path.clone(), args.disk_cache_size.as_u64());
-    let cache = Arc::new(cache);
+    let (disk_cache, cleanup_rx) =
+        DiskCache::new(args.disk_path.clone(), args.disk_cache_size.as_u64());
+    let disk_cache = Arc::new(disk_cache);
+    let memory_cache = Arc::new(MemoryCache::new(args.memory_cache_size.as_u64()));
 
     let workers: Vec<_> = (1..num_shards)
         .map(|shard_id| {
             let args = args.clone();
-            let cache = Arc::clone(&cache);
+            let disk_cache = Arc::clone(&disk_cache);
+            let memory_cache = Arc::clone(&memory_cache);
             let shutdown_rx = shutdown_rx.clone();
             let cleanup_rx = cleanup_rx.clone();
             thread::Builder::new()
                 .name(format!("shard-{shard_id}"))
-                .spawn(move || run_shard(shard_id, args, cache, None, shutdown_rx, cleanup_rx))
+                .spawn(move || {
+                    run_shard(
+                        shard_id,
+                        args,
+                        disk_cache,
+                        memory_cache,
+                        None,
+                        shutdown_rx,
+                        cleanup_rx,
+                    )
+                })
                 .expect("failed to spawn worker thread")
         })
         .collect();
 
-    run_shard(0, args, cache, Some(shutdown_tx), shutdown_rx, cleanup_rx);
+    run_shard(
+        0,
+        args,
+        disk_cache,
+        memory_cache,
+        Some(shutdown_tx),
+        shutdown_rx,
+        cleanup_rx,
+    );
 
     for worker in workers {
         let _ = worker.join();

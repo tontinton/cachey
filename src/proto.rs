@@ -1,4 +1,9 @@
+use std::ops::Range;
+
+use rsmp::Array;
 use rsmp::prelude::*;
+
+pub type MemoryCacheRanges = Array<Range<u64>>;
 
 #[derive(Args, Debug)]
 pub struct NotFoundError {
@@ -31,5 +36,5 @@ impl From<std::io::Error> for CacheError {
 #[rsmp::service(error = CacheError)]
 pub trait CacheService {
     async fn get(&self, id: String, offset: u64, size: u64) -> Stream;
-    async fn put(&self, id: String, body: Stream);
+    async fn put(&self, id: String, memory_cache_ranges: Option<MemoryCacheRanges>, body: Stream);
 }
