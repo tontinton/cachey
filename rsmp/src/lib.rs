@@ -149,6 +149,24 @@ pub enum ServiceError {
 
 pub const ERROR_MARKER: u64 = u64::MAX;
 
+pub struct CallContext<'a> {
+    pub method_id: FieldIndex,
+    pub method_name: &'a str,
+}
+
+pub trait Interceptor {
+    type State;
+
+    fn before(&self, ctx: &CallContext) -> Self::State;
+    fn after(&self, ctx: &CallContext, state: Self::State, success: bool);
+}
+
+impl Interceptor for () {
+    type State = ();
+    fn before(&self, _ctx: &CallContext) {}
+    fn after(&self, _ctx: &CallContext, _state: (), _success: bool) {}
+}
+
 #[derive(Debug, Error)]
 pub enum TransportError {
     #[error("io error: {0}")]

@@ -684,6 +684,12 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
         quote! { pub const #name: u16 = #idx; }
     });
 
+    let method_name_arms = methods.iter().map(|m| {
+        let idx = m.idx;
+        let name_str = m.name.to_string();
+        quote! { #idx => Some(#name_str), }
+    });
+
     let error_ty_tokens = error_ty
         .as_ref()
         .map(|t| quote! { #t })
@@ -798,12 +804,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     #idx => {
                         #(#decode_args)*
                         match __handler.#name(#(#call_args,)* __stream, __req_size).await {
-                            Ok((_result, _resp_size)) => {}
+                            Ok((_result, _resp_size)) => true,
                             Err(e) => {
                                 __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
                                 let err_data = rsmp::Args::encode_args(&e);
                                 __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await?;
                                 __stream.write_all(&err_data).await?;
+                                false
                             }
                         }
                     }
@@ -812,12 +819,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     #idx => {
                         #(#decode_args)*
                         match __handler.#name(#(#call_args,)* __stream, __req_size).await {
-                            Ok(_resp_size) => {}
+                            Ok(_resp_size) => true,
                             Err(e) => {
                                 __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
                                 let err_data = rsmp::Args::encode_args(&e);
                                 __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await?;
                                 __stream.write_all(&err_data).await?;
+                                false
                             }
                         }
                     }
@@ -830,11 +838,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                                 let response = rsmp::Args::encode_args(&result);
                                 __stream.write_all(&(response.len() as u32).to_be_bytes()).await?;
                                 __stream.write_all(&response).await?;
+                                true
                             }
                             Err(e) => {
                                 let err_data = rsmp::Args::encode_args(&e);
                                 __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await?;
                                 __stream.write_all(&err_data).await?;
+                                false
                             }
                         }
                     }
@@ -845,11 +855,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                         match __handler.#name(#(#call_args,)* __stream, __req_size).await {
                             Ok(()) => {
                                 __stream.write_all(&0u32.to_be_bytes()).await?;
+                                true
                             }
                             Err(e) => {
                                 let err_data = rsmp::Args::encode_args(&e);
                                 __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await?;
                                 __stream.write_all(&err_data).await?;
+                                false
                             }
                         }
                     }
@@ -858,12 +870,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     #idx => {
                         #(#decode_args)*
                         match __handler.#name(#(#call_args,)* __stream).await {
-                            Ok((_result, _resp_size)) => {}
+                            Ok((_result, _resp_size)) => true,
                             Err(e) => {
                                 __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
                                 let err_data = rsmp::Args::encode_args(&e);
                                 __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await?;
                                 __stream.write_all(&err_data).await?;
+                                false
                             }
                         }
                     }
@@ -872,12 +885,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     #idx => {
                         #(#decode_args)*
                         match __handler.#name(#(#call_args,)* __stream).await {
-                            Ok(_resp_size) => {}
+                            Ok(_resp_size) => true,
                             Err(e) => {
                                 __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
                                 let err_data = rsmp::Args::encode_args(&e);
                                 __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await?;
                                 __stream.write_all(&err_data).await?;
+                                false
                             }
                         }
                     }
@@ -890,11 +904,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                                 let response = rsmp::Args::encode_args(&result);
                                 __stream.write_all(&(response.len() as u32).to_be_bytes()).await?;
                                 __stream.write_all(&response).await?;
+                                true
                             }
                             Err(e) => {
                                 let err_data = rsmp::Args::encode_args(&e);
                                 __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await?;
                                 __stream.write_all(&err_data).await?;
+                                false
                             }
                         }
                     }
@@ -905,11 +921,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                         match __handler.#name(#(#call_args),*).await {
                             Ok(()) => {
                                 __stream.write_all(&0u32.to_be_bytes()).await?;
+                                true
                             }
                             Err(e) => {
                                 let err_data = rsmp::Args::encode_args(&e);
                                 __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await?;
                                 __stream.write_all(&err_data).await?;
+                                false
                             }
                         }
                     }
@@ -1116,6 +1134,9 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
 
     let vis = &input.vis;
 
+    let dispatcher_name = format_ident!("{}Dispatcher", trait_name);
+    let local_dispatcher_name = format_ident!("{}DispatcherLocal", trait_name);
+
     Ok(quote! {
         #vis mod #mod_name {
             use super::*;
@@ -1126,6 +1147,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 match __method_id {
                     #(#has_stream_arms)*
                     _ => false,
+                }
+            }
+
+            pub fn method_name(__method_id: u16) -> Option<&'static str> {
+                match __method_id {
+                    #(#method_name_arms)*
+                    _ => None,
                 }
             }
 
@@ -1147,6 +1175,62 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 Ok(map)
             }
 
+            pub async fn do_dispatch<H, C, I>(
+                __handler: &H,
+                __stream: &mut C,
+                __frame: rsmp::RequestFrame,
+                __interceptor: &I,
+            ) -> Result<(), rsmp::ServiceError>
+            where
+                H: #handler_name<C>,
+                C: rsmp::AsyncStreamCompat,
+                I: rsmp::Interceptor,
+            {
+                let __method_name = method_name(__frame.method_id)
+                    .ok_or(rsmp::ServiceError::MethodNotFound(__frame.method_id))?;
+                let __call_ctx = rsmp::CallContext {
+                    method_id: __frame.method_id as rsmp::FieldIndex,
+                    method_name: __method_name,
+                };
+                let __interceptor_state = __interceptor.before(&__call_ctx);
+                let __arg_map = parse_args(&__frame.args_data)?;
+                let __req_size = __frame.body_size;
+                let __success = match __frame.method_id {
+                    #(#dispatch_arms)*
+                    _ => return Err(rsmp::ServiceError::MethodNotFound(__frame.method_id)),
+                };
+                __interceptor.after(&__call_ctx, __interceptor_state, __success);
+                Ok(())
+            }
+
+            pub async fn do_dispatch_local<H, C, I>(
+                __handler: &H,
+                __stream: &mut C,
+                __frame: rsmp::RequestFrame,
+                __interceptor: &I,
+            ) -> Result<(), rsmp::ServiceError>
+            where
+                H: #local_handler_name<C>,
+                C: rsmp::AsyncStreamCompat,
+                I: rsmp::Interceptor,
+            {
+                let __method_name = method_name(__frame.method_id)
+                    .ok_or(rsmp::ServiceError::MethodNotFound(__frame.method_id))?;
+                let __call_ctx = rsmp::CallContext {
+                    method_id: __frame.method_id as rsmp::FieldIndex,
+                    method_name: __method_name,
+                };
+                let __interceptor_state = __interceptor.before(&__call_ctx);
+                let __arg_map = parse_args(&__frame.args_data)?;
+                let __req_size = __frame.body_size;
+                let __success = match __frame.method_id {
+                    #(#dispatch_arms)*
+                    _ => return Err(rsmp::ServiceError::MethodNotFound(__frame.method_id)),
+                };
+                __interceptor.after(&__call_ctx, __interceptor_state, __success);
+                Ok(())
+            }
+
             pub async fn dispatch<H, C>(
                 __handler: &H,
                 __stream: &mut C,
@@ -1156,13 +1240,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 H: #handler_name<C>,
                 C: rsmp::AsyncStreamCompat,
             {
-                let __arg_map = parse_args(&__frame.args_data)?;
-                let __req_size = __frame.body_size;
-                match __frame.method_id {
-                    #(#dispatch_arms)*
-                    _ => return Err(rsmp::ServiceError::MethodNotFound(__frame.method_id)),
-                }
-                Ok(())
+                do_dispatch(__handler, __stream, __frame, &()).await
             }
 
             pub async fn dispatch_local<H, C>(
@@ -1174,13 +1252,77 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 H: #local_handler_name<C>,
                 C: rsmp::AsyncStreamCompat,
             {
-                let __arg_map = parse_args(&__frame.args_data)?;
-                let __req_size = __frame.body_size;
-                match __frame.method_id {
-                    #(#dispatch_arms)*
-                    _ => return Err(rsmp::ServiceError::MethodNotFound(__frame.method_id)),
+                do_dispatch_local(__handler, __stream, __frame, &()).await
+            }
+        }
+
+        #vis struct #dispatcher_name<'a, H, C, I = ()> {
+            handler: &'a H,
+            stream: &'a mut C,
+            interceptor: I,
+        }
+
+        impl<'a, H, C> #dispatcher_name<'a, H, C, ()>
+        where
+            H: #handler_name<C>,
+            C: rsmp::AsyncStreamCompat,
+        {
+            pub fn new(handler: &'a H, stream: &'a mut C) -> Self {
+                Self { handler, stream, interceptor: () }
+            }
+        }
+
+        impl<'a, H, C, I> #dispatcher_name<'a, H, C, I>
+        where
+            H: #handler_name<C>,
+            C: rsmp::AsyncStreamCompat,
+            I: rsmp::Interceptor,
+        {
+            pub fn interceptor<I2: rsmp::Interceptor>(self, interceptor: I2) -> #dispatcher_name<'a, H, C, I2> {
+                #dispatcher_name {
+                    handler: self.handler,
+                    stream: self.stream,
+                    interceptor,
                 }
-                Ok(())
+            }
+
+            pub async fn dispatch(self, frame: rsmp::RequestFrame) -> Result<(), rsmp::ServiceError> {
+                #mod_name::do_dispatch(self.handler, self.stream, frame, &self.interceptor).await
+            }
+        }
+
+        #vis struct #local_dispatcher_name<'a, H, C, I = ()> {
+            handler: &'a H,
+            stream: &'a mut C,
+            interceptor: I,
+        }
+
+        impl<'a, H, C> #local_dispatcher_name<'a, H, C, ()>
+        where
+            H: #local_handler_name<C>,
+            C: rsmp::AsyncStreamCompat,
+        {
+            pub fn new(handler: &'a H, stream: &'a mut C) -> Self {
+                Self { handler, stream, interceptor: () }
+            }
+        }
+
+        impl<'a, H, C, I> #local_dispatcher_name<'a, H, C, I>
+        where
+            H: #local_handler_name<C>,
+            C: rsmp::AsyncStreamCompat,
+            I: rsmp::Interceptor,
+        {
+            pub fn interceptor<I2: rsmp::Interceptor>(self, interceptor: I2) -> #local_dispatcher_name<'a, H, C, I2> {
+                #local_dispatcher_name {
+                    handler: self.handler,
+                    stream: self.stream,
+                    interceptor,
+                }
+            }
+
+            pub async fn dispatch(self, frame: rsmp::RequestFrame) -> Result<(), rsmp::ServiceError> {
+                #mod_name::do_dispatch_local(self.handler, self.stream, frame, &self.interceptor).await
             }
         }
 

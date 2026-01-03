@@ -12,15 +12,37 @@ use compio::runtime::spawn;
 use futures_util::FutureExt;
 use futures_util::future::select;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use rsmp::{AsyncStreamCompat, RequestFrame};
+use prometheus::HistogramTimer;
+use rsmp::{AsyncStreamCompat, CallContext, Interceptor, RequestFrame};
 use tracing::{debug, error, info};
 
 use crate::cache::Cache;
 use crate::metrics::METRICS;
-use crate::proto::{CacheError, CacheServiceHandlerLocal, NotFoundError, cache_service};
+use crate::proto::{
+    CacheError, CacheServiceDispatcherLocal, CacheServiceHandlerLocal, NotFoundError, cache_service,
+};
 use crate::{BufResultExt, create_listener};
 
 const STREAM_FILE_BUF_SIZE: usize = 64 * 1024;
+
+struct MetricsInterceptor;
+
+impl Interceptor for MetricsInterceptor {
+    type State = HistogramTimer;
+
+    fn before(&self, _ctx: &CallContext) -> Self::State {
+        METRICS.request_duration.start_timer()
+    }
+
+    fn after(&self, ctx: &CallContext, timer: Self::State, success: bool) {
+        let status = if success { "success" } else { "error" };
+        METRICS
+            .requests_total
+            .with_label_values(&[ctx.method_name, status])
+            .inc();
+        timer.observe_duration();
+    }
+}
 
 struct TcpStreamCompat(TcpStream);
 
@@ -63,17 +85,10 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         size: u64,
         stream: &mut TcpStreamCompat,
     ) -> Result<u64, CacheError> {
-        let timer = METRICS.request_duration.start_timer();
-
         let path = match self.cache.get(&id) {
             Some(p) => p,
             None => {
                 debug!(shard_id = self.shard_id, id, "not found");
-                METRICS
-                    .requests_total
-                    .with_label_values(&["get", "not_found"])
-                    .inc();
-                timer.observe_duration();
                 return Err(CacheError::NotFound(NotFoundError { id }));
             }
         };
@@ -105,14 +120,9 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         }
 
         METRICS
-            .requests_total
-            .with_label_values(&["get", "success"])
-            .inc();
-        METRICS
             .bytes_read_total
             .with_label_values(&["get"])
             .inc_by(size);
-        timer.observe_duration();
 
         Ok(size)
     }
@@ -123,8 +133,6 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         stream: &mut TcpStreamCompat,
         size: u64,
     ) -> Result<(), CacheError> {
-        let timer = METRICS.request_duration.start_timer();
-
         let path = self.cache.generate_path(&id);
 
         debug!(shard_id = self.shard_id, id, ?path, "writing");
@@ -151,14 +159,9 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         debug!(shard_id = self.shard_id, ?path, "written");
 
         METRICS
-            .requests_total
-            .with_label_values(&["put", "success"])
-            .inc();
-        METRICS
             .bytes_written_total
             .with_label_values(&["put"])
             .inc_by(size);
-        timer.observe_duration();
 
         Ok(())
     }
@@ -191,7 +194,9 @@ where
             }
         };
 
-        if cache_service::dispatch_local(handler, &mut conn, frame)
+        if CacheServiceDispatcherLocal::new(handler, &mut conn)
+            .interceptor(MetricsInterceptor)
+            .dispatch(frame)
             .await
             .is_err()
         {
