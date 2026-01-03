@@ -10,17 +10,14 @@ use compio::io::{AsyncRead, AsyncReadAt, AsyncWriteAtExt, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::runtime::spawn;
 use futures_util::FutureExt;
-use futures_util::future::select;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use prometheus::HistogramTimer;
-use rsmp::{AsyncStreamCompat, CallContext, Interceptor, RequestFrame};
+use rsmp::{AsyncStreamCompat, CallContext, Interceptor};
 use tracing::{debug, error, info};
 
 use crate::cache::Cache;
 use crate::metrics::METRICS;
-use crate::proto::{
-    CacheError, CacheServiceDispatcherLocal, CacheServiceHandlerLocal, NotFoundError, cache_service,
-};
+use crate::proto::{CacheError, CacheServiceDispatcher, CacheServiceHandlerLocal, NotFoundError};
 use crate::{BufResultExt, create_listener};
 
 const STREAM_FILE_BUF_SIZE: usize = 64 * 1024;
@@ -171,38 +168,12 @@ async fn handle_connection<H>(handler: &H, stream: TcpStream, mut shutdown_rx: R
 where
     H: CacheServiceHandlerLocal<TcpStreamCompat>,
 {
-    let mut conn = TcpStreamCompat(stream);
-
-    loop {
-        match shutdown_rx.try_recv() {
-            Ok(_) | Err(async_broadcast::TryRecvError::Closed) => break,
-            Err(
-                async_broadcast::TryRecvError::Empty | async_broadcast::TryRecvError::Overflowed(_),
-            ) => {}
-        }
-
-        let frame = {
-            let read_fut = pin!(RequestFrame::read(
-                &mut conn,
-                cache_service::has_request_stream
-            ));
-            let shutdown_fut = pin!(shutdown_rx.recv());
-
-            match select(read_fut, shutdown_fut).await {
-                futures_util::future::Either::Left((Ok(frame), _)) => frame,
-                _ => break,
-            }
-        };
-
-        if CacheServiceDispatcherLocal::new(handler, &mut conn)
-            .interceptor(MetricsInterceptor)
-            .dispatch(frame)
-            .await
-            .is_err()
-        {
-            break;
-        }
-    }
+    let mut compat = TcpStreamCompat(stream);
+    CacheServiceDispatcher::new(handler, &mut compat)
+        .interceptor(MetricsInterceptor)
+        .local()
+        .run_until(shutdown_rx.recv())
+        .await;
 }
 
 pub async fn serve_shard(

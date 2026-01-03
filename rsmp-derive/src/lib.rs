@@ -1262,11 +1262,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
             interceptor: I,
         }
 
-        impl<'a, H, C> #dispatcher_name<'a, H, C, ()>
-        where
-            H: #handler_name<C>,
-            C: rsmp::AsyncStreamCompat,
-        {
+        impl<'a, H, C> #dispatcher_name<'a, H, C, ()> {
             pub fn new(handler: &'a H, stream: &'a mut C) -> Self {
                 Self { handler, stream, interceptor: () }
             }
@@ -1274,8 +1270,6 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
 
         impl<'a, H, C, I> #dispatcher_name<'a, H, C, I>
         where
-            H: #handler_name<C>,
-            C: rsmp::AsyncStreamCompat,
             I: rsmp::Interceptor,
         {
             pub fn interceptor<I2: rsmp::Interceptor>(self, interceptor: I2) -> #dispatcher_name<'a, H, C, I2> {
@@ -1285,26 +1279,38 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     interceptor,
                 }
             }
+        }
 
-            pub async fn dispatch(self, frame: rsmp::RequestFrame) -> Result<(), rsmp::ServiceError> {
+        impl<'a, H, C, I> #dispatcher_name<'a, H, C, I>
+        where
+            H: #handler_name<C>,
+            C: rsmp::AsyncStreamCompat,
+            I: rsmp::Interceptor,
+        {
+            pub async fn dispatch(&mut self, frame: rsmp::RequestFrame) -> Result<(), rsmp::ServiceError> {
                 #mod_name::do_dispatch(self.handler, self.stream, frame, &self.interceptor).await
             }
         }
 
-        #vis struct #local_dispatcher_name<'a, H, C, I = ()> {
-            handler: &'a H,
-            stream: &'a mut C,
-            interceptor: I,
-        }
-
-        impl<'a, H, C> #local_dispatcher_name<'a, H, C, ()>
+        impl<'a, H, C, I> #dispatcher_name<'a, H, C, I>
         where
             H: #local_handler_name<C>,
             C: rsmp::AsyncStreamCompat,
+            I: rsmp::Interceptor,
         {
-            pub fn new(handler: &'a H, stream: &'a mut C) -> Self {
-                Self { handler, stream, interceptor: () }
+            pub fn local(self) -> #local_dispatcher_name<'a, H, C, I> {
+                #local_dispatcher_name {
+                    handler: self.handler,
+                    stream: self.stream,
+                    interceptor: self.interceptor,
+                }
             }
+        }
+
+        #vis struct #local_dispatcher_name<'a, H, C, I> {
+            handler: &'a H,
+            stream: &'a mut C,
+            interceptor: I,
         }
 
         impl<'a, H, C, I> #local_dispatcher_name<'a, H, C, I>
@@ -1313,16 +1319,32 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
             C: rsmp::AsyncStreamCompat,
             I: rsmp::Interceptor,
         {
-            pub fn interceptor<I2: rsmp::Interceptor>(self, interceptor: I2) -> #local_dispatcher_name<'a, H, C, I2> {
-                #local_dispatcher_name {
-                    handler: self.handler,
-                    stream: self.stream,
-                    interceptor,
+            pub async fn dispatch(&mut self, frame: rsmp::RequestFrame) -> Result<(), rsmp::ServiceError> {
+                #mod_name::do_dispatch_local(self.handler, self.stream, frame, &self.interceptor).await
+            }
+
+            pub async fn run(&mut self) -> Result<(), rsmp::ServiceError> {
+                loop {
+                    let frame = rsmp::RequestFrame::read(self.stream, #mod_name::has_request_stream).await?;
+                    #mod_name::do_dispatch_local(self.handler, self.stream, frame, &self.interceptor).await?;
                 }
             }
 
-            pub async fn dispatch(self, frame: rsmp::RequestFrame) -> Result<(), rsmp::ServiceError> {
-                #mod_name::do_dispatch_local(self.handler, self.stream, frame, &self.interceptor).await
+            pub async fn run_until<F: std::future::Future>(mut self, shutdown: F) {
+                let mut shutdown = std::pin::pin!(shutdown);
+                loop {
+                    let frame = {
+                        let read_fut = std::pin::pin!(rsmp::RequestFrame::read(self.stream, #mod_name::has_request_stream));
+                        match rsmp::futures_util::future::select(&mut shutdown, read_fut).await {
+                            rsmp::futures_util::future::Either::Left(_) => return,
+                            rsmp::futures_util::future::Either::Right((Ok(frame), _)) => frame,
+                            rsmp::futures_util::future::Either::Right((Err(_), _)) => return,
+                        }
+                    };
+                    if #mod_name::do_dispatch_local(self.handler, self.stream, frame, &self.interceptor).await.is_err() {
+                        return;
+                    }
+                }
             }
         }
 

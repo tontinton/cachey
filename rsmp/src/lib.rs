@@ -8,6 +8,7 @@ use thiserror::Error;
 
 pub use async_trait::async_trait;
 pub use futures_io::AsyncRead;
+pub use futures_util;
 pub use rsmp_derive::{Args, handler, local_handler, local_stream_compat, service, stream_compat};
 
 pub mod transport;
