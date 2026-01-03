@@ -18,6 +18,11 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::default);
 
 const METRICS_SERVER_NUM_LISTENERS: i32 = 128;
 
+pub const LABEL_DISK: &str = "disk";
+pub const LABEL_MEMORY: &str = "memory";
+pub const LABEL_SUCCESS: &str = "success";
+pub const LABEL_ERROR: &str = "error";
+
 pub struct Metrics {
     // Server metrics
     pub requests_total: IntCounterVec,
@@ -133,35 +138,35 @@ impl Metrics {
         memory_semaphore: &MemorySemaphore,
     ) {
         self.cache_items
-            .with_label_values(&["disk"])
+            .with_label_values(&[LABEL_DISK])
             .set(disk_cache.len() as i64);
         self.cache_weight_bytes
-            .with_label_values(&["disk"])
+            .with_label_values(&[LABEL_DISK])
             .set(disk_cache.weight() as i64);
         self.cache_capacity_bytes
-            .with_label_values(&["disk"])
+            .with_label_values(&[LABEL_DISK])
             .set(disk_cache.capacity() as i64);
         self.cache_hits_total
-            .with_label_values(&["disk"])
+            .with_label_values(&[LABEL_DISK])
             .set(disk_cache.hits() as i64);
         self.cache_misses_total
-            .with_label_values(&["disk"])
+            .with_label_values(&[LABEL_DISK])
             .set(disk_cache.misses() as i64);
 
         self.cache_items
-            .with_label_values(&["memory"])
+            .with_label_values(&[LABEL_MEMORY])
             .set(memory_cache.len() as i64);
         self.cache_weight_bytes
-            .with_label_values(&["memory"])
+            .with_label_values(&[LABEL_MEMORY])
             .set(memory_cache.weight() as i64);
         self.cache_capacity_bytes
-            .with_label_values(&["memory"])
+            .with_label_values(&[LABEL_MEMORY])
             .set(memory_cache.capacity() as i64);
         self.cache_hits_total
-            .with_label_values(&["memory"])
+            .with_label_values(&[LABEL_MEMORY])
             .set(memory_cache.hits() as i64);
         self.cache_misses_total
-            .with_label_values(&["memory"])
+            .with_label_values(&[LABEL_MEMORY])
             .set(memory_cache.misses() as i64);
 
         self.memory_semaphore_capacity_bytes

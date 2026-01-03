@@ -954,6 +954,13 @@ mod tests {
             assert_eq!(test_service::ECHO, 0);
             assert_eq!(test_service::ADD, 1);
         }
+
+        #[test]
+        fn service_generates_method_names() {
+            assert_eq!(test_service::method_name(0), Some("echo"));
+            assert_eq!(test_service::method_name(1), Some("add"));
+            assert_eq!(test_service::method_name(99), None);
+        }
     }
 
     #[derive(Args, Debug, PartialEq)]

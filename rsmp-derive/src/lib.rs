@@ -695,6 +695,15 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
         .map(|t| quote! { #t })
         .unwrap_or_else(|| quote! { std::convert::Infallible });
 
+    let method_name_consts: Vec<_> = methods
+        .iter()
+        .map(|m| {
+            let const_name = format_ident!("{}_NAME", m.name.to_string().to_uppercase());
+            let name_str = m.name.to_string();
+            quote! { const #const_name: &'static str = #name_str; }
+        })
+        .collect();
+
     let handler_methods: Vec<_> = methods
         .iter()
         .map(|m| {
@@ -705,9 +714,9 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 .args
                 .iter()
                 .map(|a| {
-                    let name = &a.name;
+                    let aname = &a.name;
                     let ty = &a.ty;
-                    quote! { #name: #ty }
+                    quote! { #aname: #ty }
                 })
                 .collect();
 
@@ -1350,11 +1359,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
 
         #[rsmp::async_trait]
         #vis trait #handler_name<C: rsmp::AsyncStreamCompat>: Send + Sync {
+            #(#method_name_consts)*
             #(#handler_methods)*
         }
 
         #[rsmp::async_trait(?Send)]
         #vis trait #local_handler_name<C: rsmp::AsyncStreamCompat> {
+            #(#method_name_consts)*
             #(#handler_methods)*
         }
 

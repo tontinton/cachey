@@ -18,7 +18,7 @@ use rsmp::{AsyncStreamCompat, CallContext, Interceptor};
 use tracing::{debug, error, info};
 
 use crate::cache::{DiskCache, MemoryCache};
-use crate::metrics::METRICS;
+use crate::metrics::{LABEL_ERROR, LABEL_SUCCESS, METRICS};
 use crate::proto::{
     CacheError, CacheServiceDispatcher, CacheServiceHandlerLocal, MemoryCacheRanges, NotFoundError,
 };
@@ -53,7 +53,7 @@ impl Interceptor for MetricsInterceptor {
     }
 
     fn after(&self, ctx: &CallContext, timer: Self::State, success: bool) {
-        let status = if success { "success" } else { "error" };
+        let status = if success { LABEL_SUCCESS } else { LABEL_ERROR };
         METRICS
             .requests_total
             .with_label_values(&[ctx.method_name, status])
@@ -213,7 +213,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
             self.stream_buffer(&data, stream).await?;
             METRICS
                 .bytes_read_total
-                .with_label_values(&["get"])
+                .with_label_values(&[Self::GET_NAME])
                 .inc_by(size);
             return Ok(size);
         }
@@ -233,7 +233,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
 
         METRICS
             .bytes_read_total
-            .with_label_values(&["get"])
+            .with_label_values(&[Self::GET_NAME])
             .inc_by(size);
 
         Ok(size)
@@ -279,7 +279,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
 
         METRICS
             .bytes_written_total
-            .with_label_values(&["put"])
+            .with_label_values(&[Self::PUT_NAME])
             .inc_by(size);
 
         Ok(())
