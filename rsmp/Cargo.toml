@@ -9,3 +9,4 @@ thiserror = "2.0"
 futures-io = "0.3"
 async-trait = "0.1"
 pin-project = "1.0"
+strum = { version = "0.27", features = ["derive"] }

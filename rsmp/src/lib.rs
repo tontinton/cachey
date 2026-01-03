@@ -3,6 +3,7 @@ extern crate self as rsmp;
 use std::io;
 use std::pin::Pin;
 
+use strum::FromRepr;
 use thiserror::Error;
 
 pub use async_trait::async_trait;
@@ -28,40 +29,22 @@ pub enum ProtocolError {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, FromRepr)]
 pub enum WireType {
-    I8 = 0,
-    U8 = 1,
-    I16 = 2,
-    U16 = 3,
-    I32 = 4,
-    U32 = 5,
-    I64 = 6,
-    U64 = 7,
-    Bool = 8,
-    String = 9,
-    Bytes = 10,
-    None = 11,
-}
-
-impl WireType {
-    pub fn from_u8(v: u8) -> Result<Self, ProtocolError> {
-        match v {
-            0 => Ok(Self::I8),
-            1 => Ok(Self::U8),
-            2 => Ok(Self::I16),
-            3 => Ok(Self::U16),
-            4 => Ok(Self::I32),
-            5 => Ok(Self::U32),
-            6 => Ok(Self::I64),
-            7 => Ok(Self::U64),
-            8 => Ok(Self::Bool),
-            9 => Ok(Self::String),
-            10 => Ok(Self::Bytes),
-            11 => Ok(Self::None),
-            _ => Err(ProtocolError::InvalidWireType(v)),
-        }
-    }
+    None = 0,
+    I8 = 1,
+    U8 = 2,
+    I16 = 3,
+    U16 = 4,
+    I32 = 5,
+    U32 = 6,
+    I64 = 7,
+    U64 = 8,
+    F32 = 9,
+    F64 = 10,
+    Bool = 11,
+    String = 12,
+    Bytes = 13,
 }
 
 pub trait Encode {
@@ -250,7 +233,7 @@ pub fn read_field(data: &[u8]) -> Result<(u16, WireType, &[u8], usize), Protocol
         return Err(ProtocolError::UnexpectedEof);
     }
     let field_idx = u16::from_be_bytes([data[0], data[1]]);
-    let wire_type = WireType::from_u8(data[2])?;
+    let wire_type = WireType::from_repr(data[2]).ok_or(ProtocolError::InvalidWireType(data[2]))?;
     let len = u16::from_be_bytes([data[3], data[4]]) as usize;
     if data.len() < 5 + len {
         return Err(ProtocolError::UnexpectedEof);
@@ -316,6 +299,8 @@ impl_int!(i32, I32);
 impl_int!(u32, U32);
 impl_int!(i64, I64);
 impl_int!(u64, U64);
+impl_int!(f32, F32);
+impl_int!(f64, F64);
 
 impl Encode for bool {
     fn encode(&self, buf: &mut Vec<u8>) {
@@ -652,6 +637,80 @@ mod tests {
     }
 
     #[test]
+    fn f32_roundtrip() {
+        let values = [
+            0.0f32,
+            1.0,
+            -1.0,
+            std::f32::consts::PI,
+            f32::MIN,
+            f32::MAX,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for val in values {
+            let mut buf = Vec::new();
+            val.encode(&mut buf);
+            let decoded = f32::decode(WireType::F32, &buf).unwrap();
+            assert_eq!(val, decoded);
+        }
+    }
+
+    #[test]
+    fn f32_nan_roundtrip() {
+        let val = f32::NAN;
+        let mut buf = Vec::new();
+        val.encode(&mut buf);
+        let decoded = f32::decode(WireType::F32, &buf).unwrap();
+        assert!(decoded.is_nan());
+    }
+
+    #[test]
+    fn f64_roundtrip() {
+        let values = [
+            0.0f64,
+            1.0,
+            -1.0,
+            std::f64::consts::PI,
+            f64::MIN,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        for val in values {
+            let mut buf = Vec::new();
+            val.encode(&mut buf);
+            let decoded = f64::decode(WireType::F64, &buf).unwrap();
+            assert_eq!(val, decoded);
+        }
+    }
+
+    #[test]
+    fn f64_nan_roundtrip() {
+        let val = f64::NAN;
+        let mut buf = Vec::new();
+        val.encode(&mut buf);
+        let decoded = f64::decode(WireType::F64, &buf).unwrap();
+        assert!(decoded.is_nan());
+    }
+
+    #[test]
+    fn f32_args_roundtrip() {
+        let val = std::f32::consts::PI;
+        let encoded = val.encode_args();
+        let decoded = f32::decode_args(&encoded).unwrap();
+        assert_eq!(val, decoded);
+    }
+
+    #[test]
+    fn f64_args_roundtrip() {
+        let val = std::f64::consts::E;
+        let encoded = val.encode_args();
+        let decoded = f64::decode_args(&encoded).unwrap();
+        assert_eq!(val, decoded);
+    }
+
+    #[test]
     fn empty_string_roundtrip() {
         let val = String::new();
         let mut buf = Vec::new();
@@ -825,9 +884,10 @@ mod tests {
     }
 
     #[test]
-    fn wire_type_from_invalid_byte_errors() {
-        let result = WireType::from_u8(200);
-        assert!(matches!(result, Err(ProtocolError::InvalidWireType(200))));
+    fn wire_type_from_invalid_byte_returns_none() {
+        assert!(WireType::from_repr(200).is_none());
+        assert!(WireType::from_repr(0).is_some());
+        assert_eq!(WireType::from_repr(0), Some(WireType::None));
     }
 
     #[test]
