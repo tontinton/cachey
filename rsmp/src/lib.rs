@@ -76,17 +76,32 @@ impl Args for std::convert::Infallible {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Stream;
-
-pub struct BodyStream<R> {
-    pub reader: R,
+pub struct Stream {
+    pub reader: Box<dyn AsyncRead + Unpin>,
     pub size: u64,
 }
 
-impl<R> BodyStream<R> {
-    pub fn new(reader: R, size: u64) -> Self {
-        Self { reader, size }
+impl Stream {
+    pub fn new<R: AsyncRead + Unpin + 'static>(reader: R, size: u64) -> Self {
+        Self {
+            reader: Box::new(reader),
+            size,
+        }
+    }
+
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        let size = data.len() as u64;
+        Self {
+            reader: Box::new(futures_util::io::Cursor::new(data)),
+            size,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            reader: Box::new(futures_util::io::empty()),
+            size: 0,
+        }
     }
 }
 

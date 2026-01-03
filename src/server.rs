@@ -4,7 +4,6 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::MemorySemaphore;
 use async_broadcast::{Receiver, broadcast};
 use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
@@ -22,7 +21,7 @@ use crate::metrics::{LABEL_ERROR, LABEL_SUCCESS, METRICS};
 use crate::proto::{
     CacheError, CacheServiceDispatcher, CacheServiceHandlerLocal, MemoryCacheRanges, NotFoundError,
 };
-use crate::{BufResultExt, create_listener};
+use crate::{BufResultExt, MemorySemaphore, create_listener};
 
 const STREAM_FILE_BUF_SIZE: usize = 64 * 1024;
 
@@ -97,6 +96,17 @@ pub struct CacheHandler {
 }
 
 impl CacheHandler {
+    async fn stream_buffer(data: &[u8], stream: &mut TcpStreamCompat) -> io::Result<()> {
+        let len = data.len() as u64;
+        stream
+            .0
+            .write_all(len.to_be_bytes().to_vec())
+            .await
+            .result()?;
+        stream.0.write_all(data.to_vec()).await.result()?;
+        Ok(())
+    }
+
     async fn stream_from_file(
         file: &File,
         stream: &mut TcpStreamCompat,
@@ -129,17 +139,6 @@ impl CacheHandler {
         }
 
         Ok(current_offset - offset)
-    }
-
-    async fn stream_buffer(data: &[u8], stream: &mut TcpStreamCompat) -> io::Result<()> {
-        let len = data.len() as u64;
-        stream
-            .0
-            .write_all(len.to_be_bytes().to_vec())
-            .await
-            .result()?;
-        stream.0.write_all(data.to_vec()).await.result()?;
-        Ok(())
     }
 
     async fn stream_to_file(
@@ -190,9 +189,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         offset: u64,
         size: u64,
         stream: &mut TcpStreamCompat,
-    ) -> Result<u64, CacheError> {
-        let _permit = self.memory_semaphore.acquire(STREAM_FILE_BUF_SIZE as u64).await;
-
+    ) -> Result<(), CacheError> {
         let end = offset + size;
         if let Some(data) = self.memory_cache.get(&id, offset, end) {
             debug!(
@@ -205,7 +202,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
                 .bytes_read_total
                 .with_label_values(&[Self::GET_NAME])
                 .inc_by(bytes_sent);
-            return Ok(bytes_sent);
+            return Ok(());
         }
 
         let path = match self.disk_cache.get(&id) {
@@ -218,6 +215,11 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
 
         debug!(shard_id = self.shard_id, id, ?path, "disk cache hit");
 
+        let _permit = self
+            .memory_semaphore
+            .acquire(STREAM_FILE_BUF_SIZE as u64)
+            .await;
+
         let file = File::open(&path).await?;
         let bytes_sent = Self::stream_from_file(&file, stream, offset, size).await?;
 
@@ -226,7 +228,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
             .with_label_values(&[Self::GET_NAME])
             .inc_by(bytes_sent);
 
-        Ok(bytes_sent)
+        Ok(())
     }
 
     async fn put(

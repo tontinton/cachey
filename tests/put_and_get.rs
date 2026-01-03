@@ -10,7 +10,7 @@ use cachey::args::Args as ServerArgs;
 use cachey::cache::{DiskCache, MemoryCache};
 use cachey::proto::{CacheServiceClient, MemoryCacheRanges};
 use futures_util::AsyncReadExt;
-use rsmp::{BodyStream, StreamTransport, Transport};
+use rsmp::{Stream, StreamTransport, Transport};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 const TEST_DATA: &[u8] = b"Hello, rsmp protocol!";
@@ -114,7 +114,7 @@ async fn run_client_test<T: Transport>(client: &mut CacheServiceClient<T>) {
         .put(
             &"test-file".to_string(),
             &None,
-            BodyStream::new(TEST_DATA, TEST_DATA.len() as u64),
+            Stream::new(TEST_DATA, TEST_DATA.len() as u64),
         )
         .await
         .unwrap();
@@ -213,7 +213,7 @@ fn put_and_get_verifies_disk_cache_metrics() {
                 .put(
                     &"file1".to_string(),
                     &None,
-                    BodyStream::new(TEST_DATA, TEST_DATA.len() as u64),
+                    Stream::new(TEST_DATA, TEST_DATA.len() as u64),
                 )
                 .await
                 .unwrap();
@@ -252,7 +252,7 @@ fn put_with_cache_ranges_populates_memory_cache() {
                 .put(
                     &"file1".to_string(),
                     &Some(memory_cache_ranges),
-                    BodyStream::new(&data[..], data.len() as u64),
+                    Stream::from_vec(data.clone()),
                 )
                 .await
                 .unwrap();
@@ -288,7 +288,7 @@ fn get_hits_memory_cache_before_disk() {
                 .put(
                     &"file1".to_string(),
                     &Some(memory_cache_ranges),
-                    BodyStream::new(&data[..], data.len() as u64),
+                    Stream::from_vec(data.clone()),
                 )
                 .await
                 .unwrap();
@@ -330,7 +330,7 @@ fn get_falls_back_to_disk_on_memory_miss() {
                 .put(
                     &"file1".to_string(),
                     &Some(memory_cache_ranges),
-                    BodyStream::new(&data[..], data.len() as u64),
+                    Stream::from_vec(data.clone()),
                 )
                 .await
                 .unwrap();
@@ -367,7 +367,7 @@ fn get_partial_file_from_disk() {
                 .put(
                     &"bigfile".to_string(),
                     &None,
-                    BodyStream::new(&data[..], data.len() as u64),
+                    Stream::from_vec(data.clone()),
                 )
                 .await
                 .unwrap();
@@ -408,11 +408,7 @@ fn get_range_past_eof_returns_partial_data() {
             let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
 
             client
-                .put(
-                    &"small".to_string(),
-                    &None,
-                    BodyStream::new(&data[..], data.len() as u64),
-                )
+                .put(&"small".to_string(), &None, Stream::from_vec(data.clone()))
                 .await
                 .unwrap();
 
@@ -424,7 +420,11 @@ fn get_range_past_eof_returns_partial_data() {
             let mut received = Vec::new();
             body.read_to_end(&mut received).await.unwrap();
 
-            assert_eq!(received.len(), 50, "should only return 50 bytes (100 - 50 offset)");
+            assert_eq!(
+                received.len(),
+                50,
+                "should only return 50 bytes (100 - 50 offset)"
+            );
             assert_eq!(received, &data[50..100]);
         });
 }
@@ -446,7 +446,7 @@ fn sequential_requests_complete_under_memory_pressure() {
                 .put(
                     &"pressure-test".to_string(),
                     &None,
-                    BodyStream::new(&data[..], data.len() as u64),
+                    Stream::from_vec(data.clone()),
                 )
                 .await
                 .unwrap();

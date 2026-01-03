@@ -724,11 +724,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 (true, true, true) => {
                     let resp_ty = m.response_ty.as_ref().unwrap();
                     quote! {
-                        async fn #name(&self, #(#arg_params,)* stream: &mut C, req_size: u64) -> Result<(#resp_ty, u64), #err_ty>;
+                        async fn #name(&self, #(#arg_params,)* stream: &mut C, req_size: u64) -> Result<#resp_ty, #err_ty>;
                     }
                 },
-                (true, true, false) => quote! {
-                    async fn #name(&self, #(#arg_params,)* stream: &mut C, req_size: u64) -> Result<u64, #err_ty>;
+                (true, true, false) => {
+                    quote! {
+                        async fn #name(&self, #(#arg_params,)* stream: &mut C, req_size: u64) -> Result<(), #err_ty>;
+                    }
                 },
                 (true, false, true) => {
                     let resp_ty = m.response_ty.as_ref().unwrap();
@@ -742,11 +744,13 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 (false, true, true) => {
                     let resp_ty = m.response_ty.as_ref().unwrap();
                     quote! {
-                        async fn #name(&self, #(#arg_params,)* stream: &mut C) -> Result<(#resp_ty, u64), #err_ty>;
+                        async fn #name(&self, #(#arg_params,)* out: &mut C) -> Result<#resp_ty, #err_ty>;
                     }
                 },
-                (false, true, false) => quote! {
-                    async fn #name(&self, #(#arg_params,)* stream: &mut C) -> Result<u64, #err_ty>;
+                (false, true, false) => {
+                    quote! {
+                        async fn #name(&self, #(#arg_params,)* out: &mut C) -> Result<(), #err_ty>;
+                    }
                 },
                 (false, false, true) => {
                     let resp_ty = m.response_ty.as_ref().unwrap();
@@ -813,7 +817,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     #idx => {
                         #(#decode_args)*
                         match __handler.#name(#(#call_args,)* __stream, __req_size).await {
-                            Ok((_result, _resp_size)) => true,
+                            Ok(_result) => true,
                             Err(e) => {
                                 __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
                                 let err_data = rsmp::Args::encode_args(&e);
@@ -828,7 +832,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     #idx => {
                         #(#decode_args)*
                         match __handler.#name(#(#call_args,)* __stream, __req_size).await {
-                            Ok(_resp_size) => true,
+                            Ok(()) => true,
                             Err(e) => {
                                 __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
                                 let err_data = rsmp::Args::encode_args(&e);
@@ -879,7 +883,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     #idx => {
                         #(#decode_args)*
                         match __handler.#name(#(#call_args,)* __stream).await {
-                            Ok((_result, _resp_size)) => true,
+                            Ok(_result) => true,
                             Err(e) => {
                                 __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
                                 let err_data = rsmp::Args::encode_args(&e);
@@ -894,7 +898,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     #idx => {
                         #(#decode_args)*
                         match __handler.#name(#(#call_args,)* __stream).await {
-                            Ok(_resp_size) => true,
+                            Ok(()) => true,
                             Err(e) => {
                                 __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
                                 let err_data = rsmp::Args::encode_args(&e);
@@ -1003,14 +1007,14 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
 
             match (m.has_request_stream, m.has_response_stream, m.has_response_data) {
                 (true, true, _) => quote! {
-                    pub async fn #name<R: rsmp::AsyncRead + Unpin>(
+                    pub async fn #name(
                         &mut self,
                         #(#client_params,)*
-                        mut body: rsmp::BodyStream<R>,
+                        mut body: rsmp::Stream,
                     ) -> Result<rsmp::BoxAsyncRead<'_>, rsmp::ClientError<#err_ty>> {
                         #encode_block
                         match self.transport
-                            .call_with_body_and_response_stream_raw(#idx, &__buf, &mut body.reader, body.size)
+                            .call_with_body_and_response_stream_raw(#idx, &__buf, &mut *body.reader, body.size)
                             .await?
                         {
                             Ok((_response_data, stream)) => Ok(stream),
@@ -1024,14 +1028,14 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 (true, false, true) => {
                     let resp_ty = m.response_ty.as_ref().unwrap();
                     quote! {
-                        pub async fn #name<R: rsmp::AsyncRead + Unpin>(
+                        pub async fn #name(
                             &mut self,
                             #(#client_params,)*
-                            mut body: rsmp::BodyStream<R>,
+                            mut body: rsmp::Stream,
                         ) -> Result<#resp_ty, rsmp::ClientError<#err_ty>> {
                             #encode_block
                             match self.transport
-                                .call_with_body_raw(#idx, &__buf, &mut body.reader, body.size)
+                                .call_with_body_raw(#idx, &__buf, &mut *body.reader, body.size)
                                 .await?
                             {
                                 rsmp::Response::Ok(response_data) => {
@@ -1046,14 +1050,14 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     }
                 },
                 (true, false, false) => quote! {
-                    pub async fn #name<R: rsmp::AsyncRead + Unpin>(
+                    pub async fn #name(
                         &mut self,
                         #(#client_params,)*
-                        mut body: rsmp::BodyStream<R>,
+                        mut body: rsmp::Stream,
                     ) -> Result<(), rsmp::ClientError<#err_ty>> {
                         #encode_block
                         match self.transport
-                            .call_with_body_raw(#idx, &__buf, &mut body.reader, body.size)
+                            .call_with_body_raw(#idx, &__buf, &mut *body.reader, body.size)
                             .await?
                         {
                             rsmp::Response::Ok(_) => Ok(()),
