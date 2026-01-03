@@ -9,17 +9,11 @@ pub type CacheKey = String;
 pub type CleanupReceiver = flume::Receiver<PathBuf>;
 
 #[derive(Clone)]
-struct File {
-    id: String,
-    size: u64,
-}
+struct SizeWeighter;
 
-#[derive(Clone)]
-struct FileWeighter;
-
-impl Weighter<CacheKey, File> for FileWeighter {
-    fn weight(&self, _key: &CacheKey, file: &File) -> u64 {
-        file.size
+impl Weighter<CacheKey, u64> for SizeWeighter {
+    fn weight(&self, _key: &CacheKey, size: &u64) -> u64 {
+        *size
     }
 }
 
@@ -29,18 +23,17 @@ struct EvictionLifecycle {
     cleanup_tx: flume::Sender<PathBuf>,
 }
 
-impl Lifecycle<CacheKey, File> for EvictionLifecycle {
+impl Lifecycle<CacheKey, u64> for EvictionLifecycle {
     type RequestState = ();
 
     fn begin_request(&self) -> Self::RequestState {}
 
-    fn on_evict(&self, _state: &mut Self::RequestState, _key: CacheKey, file: File) {
-        let path = self.dir.join(&file.id);
+    fn on_evict(&self, _state: &mut Self::RequestState, key: CacheKey, _size: u64) {
+        let path = self.dir.join(&key);
         if self.cleanup_tx.try_send(path.clone()).is_err() {
-            // Backpressure - queue is full, block the entire event loop waiting on removal of file.
             warn!(
                 ?path,
-                "cleanup channel is full, removing evicted file by blocking event loop"
+                "cleanup channel full, blocking to remove evicted file"
             );
             let _ = std::fs::remove_file(path);
         }
@@ -54,7 +47,7 @@ pub async fn run_cleanup_loop(cleanup_rx: CleanupReceiver) {
 }
 
 type InnerCache =
-    QuickCache<CacheKey, File, FileWeighter, quick_cache::DefaultHashBuilder, EvictionLifecycle>;
+    QuickCache<CacheKey, u64, SizeWeighter, quick_cache::DefaultHashBuilder, EvictionLifecycle>;
 
 pub struct Cache {
     dir: PathBuf,
@@ -71,26 +64,24 @@ impl Cache {
         let inner = QuickCache::with(
             1000,
             capacity_bytes,
-            FileWeighter,
+            SizeWeighter,
             quick_cache::DefaultHashBuilder::default(),
             lifecycle,
         );
         (Self { dir, inner }, cleanup_rx)
     }
 
-    pub fn generate_path(&self, file_id: &str) -> PathBuf {
-        let mut path = self.dir.clone();
-        path.push(file_id);
-        path
+    pub fn generate_path(&self, key: &str) -> PathBuf {
+        self.dir.join(key)
     }
 
     pub fn get(&self, key: &CacheKey) -> Option<PathBuf> {
-        let file = self.inner.get(key)?;
-        Some(self.generate_path(&file.id))
+        self.inner.get(key)?;
+        Some(self.generate_path(key))
     }
 
-    pub fn insert(&self, key: CacheKey, file_id: String, size: u64) {
-        self.inner.insert(key, File { id: file_id, size });
+    pub fn insert(&self, key: CacheKey, size: u64) {
+        self.inner.insert(key, size);
     }
 
     pub fn len(&self) -> usize {

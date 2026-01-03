@@ -5,17 +5,15 @@ use std::thread;
 use async_broadcast::broadcast;
 use cachey::cache::{Cache, CleanupReceiver, run_cleanup_loop};
 use cachey::metrics;
+use cachey::{
+    args::{Args, parse_args},
+    server,
+};
 use compio::runtime::spawn;
 use compio::signal::ctrl_c;
 use futures_util::future::select;
 use mimalloc::MiMalloc;
 use tracing::info;
-
-use cachey::{
-    args::{Args, parse_args},
-    server,
-};
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -38,34 +36,7 @@ fn run_shard(
     shard_id: usize,
     args: Args,
     cache: Arc<Cache>,
-    shutdown_rx: async_broadcast::Receiver<()>,
-    cleanup_rx: CleanupReceiver,
-) {
-    pin_to_core(shard_id);
-    let rt = compio::runtime::RuntimeBuilder::new()
-        .build()
-        .expect("failed to build runtime");
-
-    rt.block_on(async move {
-        spawn(run_cleanup_loop(cleanup_rx)).detach();
-        spawn(metrics::serve_metrics(
-            shard_id,
-            args.metrics_listen.clone(),
-            Arc::clone(&cache),
-        ))
-        .detach();
-
-        if let Err(e) = server::serve_shard(shard_id, args, cache, shutdown_rx).await {
-            tracing::error!(shard_id, "Shard error: {e}");
-        }
-    });
-}
-
-fn run_shard_with_signals(
-    shard_id: usize,
-    args: Args,
-    cache: Arc<Cache>,
-    shutdown_tx: async_broadcast::Sender<()>,
+    shutdown_tx: Option<async_broadcast::Sender<()>>,
     shutdown_rx: async_broadcast::Receiver<()>,
     cleanup_rx: CleanupReceiver,
 ) {
@@ -85,25 +56,25 @@ fn run_shard_with_signals(
 
         let serve = pin!(server::serve_shard(shard_id, args, cache, shutdown_rx));
 
-        #[cfg(unix)]
-        let signal = pin!(async {
-            use compio::signal::unix::signal;
+        if let Some(shutdown_tx) = shutdown_tx {
+            #[cfg(unix)]
+            let signal = pin!(async {
+                use compio::signal::unix::signal;
+                select(pin!(ctrl_c()), pin!(signal(libc::SIGTERM))).await;
+                info!("Shutdown signal received");
+            });
 
-            let ctrl_c = pin!(ctrl_c());
-            let sigterm = pin!(signal(libc::SIGTERM));
+            #[cfg(not(unix))]
+            let signal = pin!(async {
+                ctrl_c().await.ok();
+                info!("Shutdown signal received");
+            });
 
-            select(ctrl_c, sigterm).await;
-            info!("Shutdown signal received");
-        });
-
-        #[cfg(not(unix))]
-        let signal = pin!(async {
-            ctrl_c().await.ok();
-            info!("Shutdown signal received");
-        });
-
-        select(serve, signal).await;
-        drop(shutdown_tx);
+            select(serve, signal).await;
+            drop(shutdown_tx);
+        } else if let Err(e) = serve.await {
+            tracing::error!(shard_id, "Shard error: {e}");
+        }
     });
 }
 
@@ -111,8 +82,7 @@ fn main() -> eyre::Result<()> {
     let args = parse_args();
 
     if args.log_json {
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        tracing_subscriber::registry().with(filter).init();
+        tracing_subscriber::fmt().json().init();
     } else {
         tracing_subscriber::fmt().init();
     }
@@ -120,7 +90,7 @@ fn main() -> eyre::Result<()> {
     #[cfg(unix)]
     let num_shards = num_cpus::get();
     #[cfg(not(unix))]
-    let num_shards = 1; // SO_REUSEPORT not available
+    let num_shards = 1;
 
     info!(?args, num_shards, "Init");
 
@@ -136,17 +106,17 @@ fn main() -> eyre::Result<()> {
             let cleanup_rx = cleanup_rx.clone();
             thread::Builder::new()
                 .name(format!("shard-{shard_id}"))
-                .spawn(move || run_shard(shard_id, args, cache, shutdown_rx, cleanup_rx))
+                .spawn(move || run_shard(shard_id, args, cache, None, shutdown_rx, cleanup_rx))
                 .expect("failed to spawn worker thread")
         })
         .collect();
 
-    run_shard_with_signals(0, args, cache, shutdown_tx, shutdown_rx, cleanup_rx);
+    run_shard(0, args, cache, Some(shutdown_tx), shutdown_rx, cleanup_rx);
 
     for worker in workers {
         let _ = worker.join();
     }
 
-    info!("All shards stopped, bye bye!");
+    info!("All shards stopped");
     Ok(())
 }

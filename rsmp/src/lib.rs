@@ -1,8 +1,17 @@
 extern crate self as rsmp;
 
+use std::io;
+use std::pin::Pin;
+
 use thiserror::Error;
 
-pub use rsmp_derive::Args;
+pub use async_trait::async_trait;
+pub use futures_io::AsyncRead;
+pub use rsmp_derive::{Args, handler, local_handler, local_stream_compat, service, stream_compat};
+
+pub mod transport;
+
+pub use transport::StreamTransport;
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {
@@ -67,29 +76,165 @@ pub trait Decode: Sized {
 pub trait Args: Sized {
     fn encode_args(&self) -> Vec<u8>;
     fn decode_args(data: &[u8]) -> Result<Self, ProtocolError>;
-    fn stream_size(&self) -> Option<u64> {
-        None
+}
+
+impl Args for std::convert::Infallible {
+    fn encode_args(&self) -> Vec<u8> {
+        match *self {}
+    }
+    fn decode_args(_data: &[u8]) -> Result<Self, ProtocolError> {
+        Err(ProtocolError::UnknownVariant(0))
     }
 }
 
-/// Marker type indicating a streaming body follows this message.
-/// The inner value is the size in bytes of the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Stream(pub u64);
+pub struct Stream;
 
-impl Encode for Stream {
-    fn encode(&self, buf: &mut Vec<u8>) {
-        self.0.encode(buf);
-    }
-    fn wire_type(&self) -> WireType {
-        WireType::U64
+pub struct BodyStream<R> {
+    pub reader: R,
+    pub size: u64,
+}
+
+impl<R> BodyStream<R> {
+    pub fn new(reader: R, size: u64) -> Self {
+        Self { reader, size }
     }
 }
 
-impl Decode for Stream {
-    fn decode(wire_type: WireType, data: &[u8]) -> Result<Self, ProtocolError> {
-        Ok(Stream(u64::decode(wire_type, data)?))
+pub struct RequestFrame {
+    pub method_id: u16,
+    pub args_data: Vec<u8>,
+    pub body_size: u64,
+}
+
+impl RequestFrame {
+    pub async fn read<C: AsyncStreamCompat>(
+        conn: &mut C,
+        has_request_stream: impl Fn(u16) -> bool,
+    ) -> io::Result<Self> {
+        let mut header = [0u8; 6];
+        conn.read_exact(&mut header[..4]).await?;
+        let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        if len < 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame too short",
+            ));
+        }
+
+        conn.read_exact(&mut header[4..6]).await?;
+        let method_id = u16::from_be_bytes([header[4], header[5]]);
+
+        let args_len = len - 2;
+        let args_data = if args_len > 0 {
+            let mut buf = vec![0u8; args_len];
+            conn.read_exact(&mut buf).await?;
+            buf
+        } else {
+            Vec::new()
+        };
+
+        let body_size = if has_request_stream(method_id) {
+            let mut size_buf = [0u8; 8];
+            conn.read_exact(&mut size_buf).await?;
+            u64::from_be_bytes(size_buf)
+        } else {
+            0
+        };
+
+        Ok(Self {
+            method_id,
+            args_data,
+            body_size,
+        })
     }
+}
+
+#[derive(Debug, Error)]
+pub enum ServiceError {
+    #[error("method not found: {0}")]
+    MethodNotFound(u16),
+    #[error("decode error: {0}")]
+    Decode(#[from] ProtocolError),
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+}
+
+pub const ERROR_MARKER: u64 = u64::MAX;
+
+#[derive(Debug, Error)]
+pub enum TransportError {
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+    #[error("decode error: {0}")]
+    Decode(#[from] ProtocolError),
+}
+
+#[derive(Debug, Error)]
+pub enum ClientError<E: std::fmt::Debug> {
+    #[error("transport error: {0}")]
+    Transport(TransportError),
+    #[error("server error: {0:?}")]
+    Server(E),
+}
+
+impl<E: std::fmt::Debug> From<TransportError> for ClientError<E> {
+    fn from(e: TransportError) -> Self {
+        Self::Transport(e)
+    }
+}
+
+impl<E: std::fmt::Debug> From<ProtocolError> for ClientError<E> {
+    fn from(e: ProtocolError) -> Self {
+        Self::Transport(TransportError::Decode(e))
+    }
+}
+
+impl<E: std::fmt::Debug> From<io::Error> for ClientError<E> {
+    fn from(e: io::Error) -> Self {
+        Self::Transport(TransportError::Io(e))
+    }
+}
+
+pub type BoxAsyncRead<'a> = Pin<Box<dyn AsyncRead + 'a>>;
+
+#[async_trait(?Send)]
+pub trait AsyncStreamCompat {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()>;
+    async fn write_all(&mut self, data: &[u8]) -> io::Result<()>;
+}
+
+pub use transport::Response;
+
+#[async_trait(?Send)]
+pub trait Transport {
+    async fn call_raw(
+        &mut self,
+        method_id: u16,
+        args_data: &[u8],
+    ) -> Result<Response, TransportError>;
+
+    async fn call_with_body_raw(
+        &mut self,
+        method_id: u16,
+        args_data: &[u8],
+        body: &mut (dyn AsyncRead + Unpin),
+        body_size: u64,
+    ) -> Result<Response, TransportError>;
+
+    async fn call_with_response_stream_raw<'a>(
+        &'a mut self,
+        method_id: u16,
+        args_data: &[u8],
+    ) -> Result<Result<BoxAsyncRead<'a>, Vec<u8>>, TransportError>;
+
+    async fn call_with_body_and_response_stream_raw<'a>(
+        &'a mut self,
+        method_id: u16,
+        args_data: &[u8],
+        body: &mut (dyn AsyncRead + Unpin),
+        body_size: u64,
+    ) -> Result<Result<(Vec<u8>, BoxAsyncRead<'a>), Vec<u8>>, TransportError>;
 }
 
 pub fn write_field(buf: &mut Vec<u8>, field_id: u16, wire_type: WireType, data: &[u8]) {
@@ -135,6 +280,29 @@ macro_rules! impl_int {
                 Ok(<$t>::from_be_bytes(data[..SIZE].try_into().unwrap()))
             }
         }
+
+        impl Args for $t {
+            fn encode_args(&self) -> Vec<u8> {
+                let mut buf = Vec::new();
+                buf.extend_from_slice(&1u16.to_be_bytes());
+                let mut field_data = Vec::new();
+                self.encode(&mut field_data);
+                write_field(&mut buf, 0, self.wire_type(), &field_data);
+                buf
+            }
+
+            fn decode_args(data: &[u8]) -> Result<Self, ProtocolError> {
+                if data.len() < 2 {
+                    return Err(ProtocolError::UnexpectedEof);
+                }
+                let field_count = u16::from_be_bytes([data[0], data[1]]);
+                if field_count == 0 {
+                    return Err(ProtocolError::MissingField(0));
+                }
+                let (_, wire_type, field_data, _) = read_field(&data[2..])?;
+                Self::decode(wire_type, field_data)
+            }
+        }
     };
 }
 
@@ -168,6 +336,29 @@ impl Decode for bool {
     }
 }
 
+impl Args for bool {
+    fn encode_args(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        let mut field_data = Vec::new();
+        self.encode(&mut field_data);
+        write_field(&mut buf, 0, self.wire_type(), &field_data);
+        buf
+    }
+
+    fn decode_args(data: &[u8]) -> Result<Self, ProtocolError> {
+        if data.len() < 2 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let field_count = u16::from_be_bytes([data[0], data[1]]);
+        if field_count == 0 {
+            return Err(ProtocolError::MissingField(0));
+        }
+        let (_, wire_type, field_data, _) = read_field(&data[2..])?;
+        Self::decode(wire_type, field_data)
+    }
+}
+
 impl Encode for String {
     fn encode(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(self.as_bytes());
@@ -183,6 +374,29 @@ impl Decode for String {
             return Err(ProtocolError::InvalidWireType(wire_type as u8));
         }
         String::from_utf8(data.to_vec()).map_err(|_| ProtocolError::InvalidUtf8)
+    }
+}
+
+impl Args for String {
+    fn encode_args(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        let mut field_data = Vec::new();
+        self.encode(&mut field_data);
+        write_field(&mut buf, 0, self.wire_type(), &field_data);
+        buf
+    }
+
+    fn decode_args(data: &[u8]) -> Result<Self, ProtocolError> {
+        if data.len() < 2 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let field_count = u16::from_be_bytes([data[0], data[1]]);
+        if field_count == 0 {
+            return Err(ProtocolError::MissingField(0));
+        }
+        let (_, wire_type, field_data, _) = read_field(&data[2..])?;
+        Self::decode(wire_type, field_data)
     }
 }
 
@@ -204,10 +418,31 @@ impl Decode for Vec<u8> {
     }
 }
 
+impl Args for Vec<u8> {
+    fn encode_args(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        let mut field_data = Vec::new();
+        self.encode(&mut field_data);
+        write_field(&mut buf, 0, self.wire_type(), &field_data);
+        buf
+    }
+
+    fn decode_args(data: &[u8]) -> Result<Self, ProtocolError> {
+        if data.len() < 2 {
+            return Err(ProtocolError::UnexpectedEof);
+        }
+        let field_count = u16::from_be_bytes([data[0], data[1]]);
+        if field_count == 0 {
+            return Err(ProtocolError::MissingField(0));
+        }
+        let (_, wire_type, field_data, _) = read_field(&data[2..])?;
+        Self::decode(wire_type, field_data)
+    }
+}
+
 pub mod prelude {
-    pub use crate::{
-        Args, Decode, Encode, ProtocolError, Stream, WireType, read_field, write_field,
-    };
+    pub use crate::{Args, Stream};
 }
 
 #[cfg(test)]
@@ -406,5 +641,390 @@ mod tests {
         write_field(&mut buf, 0xABCD, WireType::U8, &[42]);
         let (field_id, _, _, _) = read_field(&buf).unwrap();
         assert_eq!(field_id, 0xABCD);
+    }
+
+    mod service_tests {
+        use super::*;
+
+        #[allow(dead_code)]
+        #[derive(Args, Debug, PartialEq, Clone)]
+        struct EchoRequest {
+            #[field(idx = 0)]
+            message: String,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Args, Debug, PartialEq, Clone)]
+        struct EchoResponse {
+            #[field(idx = 0)]
+            message: String,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Args, Debug, PartialEq, Clone)]
+        struct AddRequest {
+            #[field(idx = 0)]
+            a: i64,
+            #[field(idx = 1)]
+            b: i64,
+        }
+
+        #[allow(dead_code)]
+        #[derive(Args, Debug, PartialEq, Clone)]
+        struct AddResponse {
+            #[field(idx = 0)]
+            result: i64,
+        }
+
+        #[service]
+        pub trait TestService {
+            async fn echo(&self, req: EchoRequest) -> EchoResponse;
+            async fn add(&self, req: AddRequest) -> AddResponse;
+        }
+
+        #[test]
+        fn service_generates_method_ids() {
+            assert_eq!(test_service::ECHO, 0);
+            assert_eq!(test_service::ADD, 1);
+        }
+    }
+
+    #[derive(Args, Debug, PartialEq)]
+    struct UnitStruct;
+
+    #[test]
+    fn unit_struct_roundtrip() {
+        let encoded = UnitStruct.encode_args();
+        assert_eq!(encoded, vec![0, 0]);
+        let decoded = UnitStruct::decode_args(&encoded).unwrap();
+        assert_eq!(decoded, UnitStruct);
+    }
+
+    #[derive(Args, Debug, PartialEq)]
+    enum TestEnum {
+        #[field(idx = 0)]
+        First(TwoFields),
+        #[field(idx = 1)]
+        Second(WithOptional),
+    }
+
+    #[test]
+    fn enum_variant_roundtrip() {
+        let first = TestEnum::First(TwoFields { a: 1, b: 2 });
+        let encoded = first.encode_args();
+        let decoded = TestEnum::decode_args(&encoded).unwrap();
+        assert_eq!(decoded, first);
+
+        let second = TestEnum::Second(WithOptional {
+            required: 99,
+            optional: Some("hello".into()),
+        });
+        let encoded = second.encode_args();
+        let decoded = TestEnum::decode_args(&encoded).unwrap();
+        assert_eq!(decoded, second);
+    }
+
+    #[test]
+    fn enum_unknown_variant_errors() {
+        let mut encoded = vec![0, 99];
+        encoded.extend_from_slice(&TwoFields { a: 1, b: 2 }.encode_args());
+        let result = TestEnum::decode_args(&encoded);
+        assert!(matches!(result, Err(ProtocolError::UnknownVariant(99))));
+    }
+
+    #[test]
+    fn decode_truncated_data_errors() {
+        let result = TwoFields::decode_args(&[0]);
+        assert!(matches!(result, Err(ProtocolError::UnexpectedEof)));
+    }
+
+    #[test]
+    fn wire_type_from_invalid_byte_errors() {
+        let result = WireType::from_u8(200);
+        assert!(matches!(result, Err(ProtocolError::InvalidWireType(200))));
+    }
+
+    #[test]
+    fn infallible_args_decode_always_errors() {
+        let result = std::convert::Infallible::decode_args(&[]);
+        assert!(matches!(result, Err(ProtocolError::UnknownVariant(0))));
+    }
+
+    #[test]
+    fn primitive_args_roundtrip() {
+        let val: u64 = 0xDEADBEEF;
+        let encoded = val.encode_args();
+        let decoded = u64::decode_args(&encoded).unwrap();
+        assert_eq!(val, decoded);
+
+        let val: i32 = -12345;
+        let encoded = val.encode_args();
+        let decoded = i32::decode_args(&encoded).unwrap();
+        assert_eq!(val, decoded);
+
+        let val = "hello world".to_string();
+        let encoded = val.encode_args();
+        let decoded = String::decode_args(&encoded).unwrap();
+        assert_eq!(val, decoded);
+
+        let val = true;
+        let encoded = val.encode_args();
+        let decoded = bool::decode_args(&encoded).unwrap();
+        assert_eq!(val, decoded);
+
+        let val: Vec<u8> = vec![1, 2, 3, 255];
+        let encoded = val.encode_args();
+        let decoded = Vec::<u8>::decode_args(&encoded).unwrap();
+        assert_eq!(val, decoded);
+    }
+
+    #[test]
+    fn primitive_args_boundary_values() {
+        for val in [i64::MIN, i64::MAX, 0i64] {
+            let encoded = val.encode_args();
+            let decoded = i64::decode_args(&encoded).unwrap();
+            assert_eq!(val, decoded);
+        }
+
+        for val in [u64::MIN, u64::MAX] {
+            let encoded = val.encode_args();
+            let decoded = u64::decode_args(&encoded).unwrap();
+            assert_eq!(val, decoded);
+        }
+    }
+
+    #[test]
+    fn args_derived_types_implement_encode_decode() {
+        let val = TwoFields { a: 100, b: 200 };
+        let mut buf = Vec::new();
+        val.encode(&mut buf);
+        let decoded = TwoFields::decode(WireType::Bytes, &buf).unwrap();
+        assert_eq!(val, decoded);
+    }
+
+    mod multi_arg_service_tests {
+        use super::*;
+
+        #[derive(Args, Debug, PartialEq, Clone)]
+        struct Response {
+            #[field(idx = 0)]
+            result: String,
+        }
+
+        #[service]
+        pub trait MultiArgService {
+            async fn single_primitive(&self, x: u64) -> Response;
+            async fn two_primitives(&self, a: String, b: i32) -> Response;
+            async fn three_mixed(&self, name: String, count: u64, data: TwoFields) -> Response;
+        }
+
+        #[test]
+        fn multi_arg_method_ids_generated() {
+            assert_eq!(multi_arg_service::SINGLE_PRIMITIVE, 0);
+            assert_eq!(multi_arg_service::TWO_PRIMITIVES, 1);
+            assert_eq!(multi_arg_service::THREE_MIXED, 2);
+        }
+
+        #[test]
+        fn response_roundtrip() {
+            let resp = Response {
+                result: "success".to_string(),
+            };
+            let mut buf = Vec::new();
+            resp.encode(&mut buf);
+            let decoded = Response::decode(WireType::Bytes, &buf).unwrap();
+            assert_eq!(resp, decoded);
+        }
+    }
+
+    mod multi_arg_compat_tests {
+        use super::*;
+
+        #[derive(Args, Debug, PartialEq, Clone)]
+        struct CompatResponse {
+            #[field(idx = 0)]
+            value: i64,
+        }
+
+        #[service]
+        pub trait CompatService {
+            async fn with_optional(
+                &self,
+                required: String,
+                optional: Option<i64>,
+            ) -> CompatResponse;
+            async fn all_optional(&self, a: Option<String>, b: Option<i64>) -> CompatResponse;
+        }
+
+        #[test]
+        fn multi_arg_forwards_compat_unknown_args_ignored() {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&3u16.to_be_bytes());
+
+            let mut field0 = Vec::new();
+            Encode::encode(&"hello".to_string(), &mut field0);
+            write_field(&mut buf, 0, WireType::String, &field0);
+
+            let mut field1 = Vec::new();
+            Encode::encode(&42i64, &mut field1);
+            write_field(&mut buf, 1, WireType::I64, &field1);
+
+            let mut field99 = Vec::new();
+            Encode::encode(&999i64, &mut field99);
+            write_field(&mut buf, 99, WireType::I64, &field99);
+
+            let arg_map = compat_service::parse_args(&buf).unwrap();
+
+            let arg0: String = arg_map
+                .get(&0)
+                .map(|(wt, data)| String::decode(*wt, data))
+                .unwrap()
+                .unwrap();
+            assert_eq!(arg0, "hello");
+
+            let arg1: i64 = arg_map
+                .get(&1)
+                .map(|(wt, data)| i64::decode(*wt, data))
+                .unwrap()
+                .unwrap();
+            assert_eq!(arg1, 42);
+
+            assert!(!arg_map.contains_key(&2));
+        }
+
+        #[test]
+        fn multi_arg_backwards_compat_optional_defaults_none() {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&1u16.to_be_bytes());
+
+            let mut field0 = Vec::new();
+            Encode::encode(&"hello".to_string(), &mut field0);
+            write_field(&mut buf, 0, WireType::String, &field0);
+
+            let arg_map = compat_service::parse_args(&buf).unwrap();
+
+            let arg0: String = arg_map
+                .get(&0)
+                .map(|(wt, data)| String::decode(*wt, data))
+                .unwrap()
+                .unwrap();
+            assert_eq!(arg0, "hello");
+
+            let arg1: Option<i64> = arg_map
+                .get(&1)
+                .map(|(wt, data)| {
+                    if *wt == WireType::None {
+                        Ok(None)
+                    } else {
+                        i64::decode(*wt, data).map(Some)
+                    }
+                })
+                .transpose()
+                .unwrap()
+                .flatten();
+            assert_eq!(arg1, None);
+        }
+
+        #[test]
+        fn multi_arg_optional_with_value_decodes() {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&2u16.to_be_bytes());
+
+            let mut field0 = Vec::new();
+            Encode::encode(&"hello".to_string(), &mut field0);
+            write_field(&mut buf, 0, WireType::String, &field0);
+
+            let mut field1 = Vec::new();
+            Encode::encode(&42i64, &mut field1);
+            write_field(&mut buf, 1, WireType::I64, &field1);
+
+            let arg_map = compat_service::parse_args(&buf).unwrap();
+
+            let arg1: Option<i64> = arg_map
+                .get(&1)
+                .map(|(wt, data)| {
+                    if *wt == WireType::None {
+                        Ok(None)
+                    } else {
+                        i64::decode(*wt, data).map(Some)
+                    }
+                })
+                .transpose()
+                .unwrap()
+                .flatten();
+            assert_eq!(arg1, Some(42));
+        }
+
+        #[test]
+        fn multi_arg_optional_explicit_none_decodes() {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&2u16.to_be_bytes());
+
+            let mut field0 = Vec::new();
+            Encode::encode(&"hello".to_string(), &mut field0);
+            write_field(&mut buf, 0, WireType::String, &field0);
+
+            write_field(&mut buf, 1, WireType::None, &[]);
+
+            let arg_map = compat_service::parse_args(&buf).unwrap();
+
+            let arg1: Option<i64> = arg_map
+                .get(&1)
+                .map(|(wt, data)| {
+                    if *wt == WireType::None {
+                        Ok(None)
+                    } else {
+                        i64::decode(*wt, data).map(Some)
+                    }
+                })
+                .transpose()
+                .unwrap()
+                .flatten();
+            assert_eq!(arg1, None);
+        }
+
+        #[test]
+        fn multi_arg_all_optional_empty_request() {
+            let buf = 0u16.to_be_bytes().to_vec();
+
+            let arg_map = compat_service::parse_args(&buf).unwrap();
+
+            let arg0: Option<String> = arg_map
+                .get(&0)
+                .map(|(wt, data)| {
+                    if *wt == WireType::None {
+                        Ok(None)
+                    } else {
+                        String::decode(*wt, data).map(Some)
+                    }
+                })
+                .transpose()
+                .unwrap()
+                .flatten();
+            assert_eq!(arg0, None);
+
+            let arg1: Option<i64> = arg_map
+                .get(&1)
+                .map(|(wt, data)| {
+                    if *wt == WireType::None {
+                        Ok(None)
+                    } else {
+                        i64::decode(*wt, data).map(Some)
+                    }
+                })
+                .transpose()
+                .unwrap()
+                .flatten();
+            assert_eq!(arg1, None);
+        }
+
+        #[test]
+        fn compat_response_roundtrip() {
+            let resp = CompatResponse { value: 42 };
+            let mut buf = Vec::new();
+            resp.encode(&mut buf);
+            let decoded = CompatResponse::decode(WireType::Bytes, &buf).unwrap();
+            assert_eq!(resp, decoded);
+        }
     }
 }

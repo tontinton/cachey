@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Fields, LitInt, Type, parse_macro_input};
+use syn::{
+    Data, DeriveInput, Fields, FnArg, ItemTrait, LitInt, Pat, ReturnType, TraitItem, Type,
+    parse_macro_input,
+};
 
 #[proc_macro_derive(Args, attributes(field))]
 pub fn derive_args(input: TokenStream) -> TokenStream {
@@ -25,23 +28,53 @@ struct FieldInfo {
     idx: u16,
     ty: Type,
     is_option: bool,
-    is_stream: bool,
 }
 
 fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
 
-    let fields = match &input.data {
-        Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => &fields.named,
-            _ => {
-                return Err(syn::Error::new_spanned(
-                    input,
-                    "only named fields supported",
-                ));
-            }
-        },
+    let data = match &input.data {
+        Data::Struct(data) => data,
         _ => return Err(syn::Error::new_spanned(input, "only structs supported")),
+    };
+
+    if matches!(&data.fields, Fields::Unit) {
+        return Ok(quote! {
+            impl rsmp::Args for #name {
+                fn encode_args(&self) -> Vec<u8> {
+                    0u16.to_be_bytes().to_vec()
+                }
+
+                fn decode_args(_data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
+                    Ok(Self)
+                }
+            }
+
+            impl rsmp::Encode for #name {
+                fn encode(&self, buf: &mut Vec<u8>) {
+                    buf.extend_from_slice(&rsmp::Args::encode_args(self));
+                }
+                fn wire_type(&self) -> rsmp::WireType {
+                    rsmp::WireType::Bytes
+                }
+            }
+
+            impl rsmp::Decode for #name {
+                fn decode(_wire_type: rsmp::WireType, data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
+                    rsmp::Args::decode_args(data)
+                }
+            }
+        });
+    }
+
+    let fields = match &data.fields {
+        Fields::Named(fields) => &fields.named,
+        _ => {
+            return Err(syn::Error::new_spanned(
+                input,
+                "only named fields or unit structs supported",
+            ));
+        }
     };
 
     let mut field_info: Vec<FieldInfo> = Vec::new();
@@ -50,7 +83,6 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let field_name = field.ident.clone().unwrap();
         let field_type = field.ty.clone();
         let is_option = is_option_type(&field_type);
-        let is_stream = is_stream_type(&field_type);
 
         let mut field_idx: Option<u16> = None;
 
@@ -74,7 +106,6 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
             idx,
             ty: field_type,
             is_option,
-            is_stream,
         });
     }
 
@@ -184,16 +215,6 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     let field_count = field_info.len() as u16;
 
-    let stream_field = field_info.iter().find(|f| f.is_stream);
-    let stream_size_impl = stream_field.map(|f| {
-        let field_name = &f.name;
-        quote! {
-            fn stream_size(&self) -> Option<u64> {
-                Some(self.#field_name.0)
-            }
-        }
-    });
-
     Ok(quote! {
         impl rsmp::Args for #name {
             fn encode_args(&self) -> Vec<u8> {
@@ -228,8 +249,21 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #(#build_fields),*
                 })
             }
+        }
 
-            #stream_size_impl
+        impl rsmp::Encode for #name {
+            fn encode(&self, buf: &mut Vec<u8>) {
+                buf.extend_from_slice(&rsmp::Args::encode_args(self));
+            }
+            fn wire_type(&self) -> rsmp::WireType {
+                rsmp::WireType::Bytes
+            }
+        }
+
+        impl rsmp::Decode for #name {
+            fn decode(_wire_type: rsmp::WireType, data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
+                rsmp::Args::decode_args(data)
+            }
         }
     })
 }
@@ -239,15 +273,6 @@ fn is_option_type(ty: &Type) -> bool {
         && let Some(segment) = type_path.path.segments.last()
     {
         return segment.ident == "Option";
-    }
-    false
-}
-
-fn is_stream_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.last()
-    {
-        return segment.ident == "Stream";
     }
     false
 }
@@ -347,13 +372,6 @@ fn impl_args_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     });
 
-    let stream_arms = variant_info.iter().map(|v| {
-        let vname = &v.name;
-        quote! {
-            Self::#vname(inner) => rsmp::Args::stream_size(inner),
-        }
-    });
-
     Ok(quote! {
         impl rsmp::Args for #name {
             fn encode_args(&self) -> Vec<u8> {
@@ -374,12 +392,661 @@ fn impl_args_enum(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     _ => Err(rsmp::ProtocolError::UnknownVariant(variant_id)),
                 }
             }
+        }
 
-            fn stream_size(&self) -> Option<u64> {
-                match self {
-                    #(#stream_arms)*
+        impl rsmp::Encode for #name {
+            fn encode(&self, buf: &mut Vec<u8>) {
+                buf.extend_from_slice(&rsmp::Args::encode_args(self));
+            }
+            fn wire_type(&self) -> rsmp::WireType {
+                rsmp::WireType::Bytes
+            }
+        }
+
+        impl rsmp::Decode for #name {
+            fn decode(_wire_type: rsmp::WireType, data: &[u8]) -> Result<Self, rsmp::ProtocolError> {
+                rsmp::Args::decode_args(data)
+            }
+        }
+    })
+}
+
+struct ArgInfo {
+    name: syn::Ident,
+    ty: Type,
+    is_option: bool,
+}
+
+struct MethodInfo {
+    name: syn::Ident,
+    idx: u16,
+    args: Vec<ArgInfo>,
+    return_ty: Type,
+    has_request_stream: bool,
+    has_response_stream: bool,
+}
+
+fn is_stream_marker_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+    {
+        return segment.ident == "Stream";
+    }
+    false
+}
+
+fn extract_tuple_types(ty: &Type) -> Option<Vec<&Type>> {
+    if let Type::Tuple(tuple) = ty {
+        return Some(tuple.elems.iter().collect());
+    }
+    None
+}
+
+/// Extract the base response type, stripping Stream from tuple
+fn extract_base_response_type(ty: &Type) -> TokenStream2 {
+    if let Some(types) = extract_tuple_types(ty) {
+        let non_stream: Vec<_> = types
+            .into_iter()
+            .filter(|t| !is_stream_marker_type(t))
+            .collect();
+        if non_stream.len() == 1 {
+            let t = non_stream[0];
+            return quote! { #t };
+        }
+    }
+    quote! { #ty }
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(c.to_ascii_lowercase());
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+struct ServiceAttr {
+    error_ty: Option<Type>,
+}
+
+impl syn::parse::Parse for ServiceAttr {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut error_ty = None;
+        while !input.is_empty() {
+            let ident: syn::Ident = input.parse()?;
+            if ident == "error" {
+                let _: syn::Token![=] = input.parse()?;
+                error_ty = Some(input.parse()?);
+            }
+            if input.peek(syn::Token![,]) {
+                let _: syn::Token![,] = input.parse()?;
+            }
+        }
+        Ok(Self { error_ty })
+    }
+}
+
+#[proc_macro_attribute]
+pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr = parse_macro_input!(attr as ServiceAttr);
+    let input = parse_macro_input!(item as ItemTrait);
+    impl_service(&input, attr.error_ty)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+#[proc_macro_attribute]
+pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item: TokenStream2 = item.into();
+    quote! {
+        #[rsmp::async_trait]
+        #item
+    }
+    .into()
+}
+
+#[proc_macro_attribute]
+pub fn local_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item: TokenStream2 = item.into();
+    quote! {
+        #[rsmp::async_trait(?Send)]
+        #item
+    }
+    .into()
+}
+
+#[proc_macro_attribute]
+pub fn stream_compat(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item: TokenStream2 = item.into();
+    quote! {
+        #[rsmp::async_trait]
+        #item
+    }
+    .into()
+}
+
+#[proc_macro_attribute]
+pub fn local_stream_compat(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item: TokenStream2 = item.into();
+    quote! {
+        #[rsmp::async_trait(?Send)]
+        #item
+    }
+    .into()
+}
+
+fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenStream2> {
+    let trait_name = &input.ident;
+    let trait_name_str = trait_name.to_string();
+    let mod_name = format_ident!("{}", to_snake_case(&trait_name_str));
+    let handler_name = format_ident!("{}Handler", trait_name);
+    let local_handler_name = format_ident!("{}HandlerLocal", trait_name);
+    let client_name = format_ident!("{}Client", trait_name);
+
+    let mut methods: Vec<MethodInfo> = Vec::new();
+
+    for (idx, item) in input.items.iter().enumerate() {
+        let TraitItem::Fn(method) = item else {
+            continue;
+        };
+
+        let sig = &method.sig;
+        let method_name = sig.ident.clone();
+
+        let mut method_idx: Option<u16> = None;
+        for attr in &method.attrs {
+            if attr.path().is_ident("method") {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("idx") {
+                        let value: LitInt = meta.value()?.parse()?;
+                        method_idx = Some(value.base10_parse()?);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        let idx = method_idx.unwrap_or(idx as u16);
+
+        let mut args: Vec<ArgInfo> = Vec::new();
+        let mut has_request_stream = false;
+        let mut stream_seen = false;
+
+        for arg in sig.inputs.iter().skip(1) {
+            if let FnArg::Typed(pat_type) = arg {
+                let ty = &*pat_type.ty;
+                let name = if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                    pat_ident.ident.clone()
+                } else {
+                    return Err(syn::Error::new_spanned(pat_type, "expected identifier"));
+                };
+
+                if is_stream_marker_type(ty) {
+                    if stream_seen {
+                        return Err(syn::Error::new_spanned(
+                            pat_type,
+                            "only one Stream argument is allowed",
+                        ));
+                    }
+                    has_request_stream = true;
+                    stream_seen = true;
+                } else {
+                    if stream_seen {
+                        return Err(syn::Error::new_spanned(
+                            pat_type,
+                            "Stream must be the last argument",
+                        ));
+                    }
+                    args.push(ArgInfo {
+                        name,
+                        ty: ty.clone(),
+                        is_option: is_option_type(ty),
+                    });
                 }
             }
+        }
+
+        let return_ty = match &sig.output {
+            ReturnType::Type(_, ty) => (**ty).clone(),
+            ReturnType::Default => {
+                return Err(syn::Error::new_spanned(
+                    sig,
+                    "method must have a return type",
+                ));
+            }
+        };
+
+        let has_response_stream = if let Some(types) = extract_tuple_types(&return_ty) {
+            types.iter().any(|t| is_stream_marker_type(t))
+        } else {
+            is_stream_marker_type(&return_ty)
+        };
+
+        methods.push(MethodInfo {
+            name: method_name,
+            idx,
+            args,
+            return_ty,
+            has_request_stream,
+            has_response_stream,
+        });
+    }
+
+    let mut seen_indices = HashSet::new();
+    for m in &methods {
+        if !seen_indices.insert(m.idx) {
+            return Err(syn::Error::new_spanned(
+                input,
+                format!("duplicate method index: {}", m.idx),
+            ));
+        }
+    }
+
+    let method_consts = methods.iter().map(|m| {
+        let name = format_ident!("{}", m.name.to_string().to_uppercase());
+        let idx = m.idx;
+        quote! { pub const #name: u16 = #idx; }
+    });
+
+    let error_ty_tokens = error_ty
+        .as_ref()
+        .map(|t| quote! { #t })
+        .unwrap_or_else(|| quote! { std::convert::Infallible });
+
+    let handler_methods: Vec<_> = methods
+        .iter()
+        .map(|m| {
+            let name = &m.name;
+            let base_return_ty = extract_base_response_type(&m.return_ty);
+            let err_ty = &error_ty_tokens;
+
+            let arg_params: Vec<_> = m
+                .args
+                .iter()
+                .map(|a| {
+                    let name = &a.name;
+                    let ty = &a.ty;
+                    quote! { #name: #ty }
+                })
+                .collect();
+
+            match (m.has_request_stream, m.has_response_stream) {
+                (true, true) => quote! {
+                    async fn #name(&self, #(#arg_params,)* stream: &mut C, req_size: u64) -> Result<(#base_return_ty, u64), #err_ty>;
+                },
+                (true, false) => quote! {
+                    async fn #name(&self, #(#arg_params,)* stream: &mut C, size: u64) -> Result<#base_return_ty, #err_ty>;
+                },
+                (false, true) => quote! {
+                    async fn #name(&self, #(#arg_params,)* stream: &mut C) -> Result<(#base_return_ty, u64), #err_ty>;
+                },
+                (false, false) => quote! {
+                    async fn #name(&self, #(#arg_params),*) -> Result<#base_return_ty, #err_ty>;
+                },
+            }
+        })
+        .collect();
+
+    let dispatch_arms: Vec<_> = methods
+        .iter()
+        .map(|m| {
+            let name = &m.name;
+            let idx = m.idx;
+
+            let decode_args: Vec<_> = m
+                .args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let var_name = format_ident!("__arg_{}", i);
+                    let ty = &a.ty;
+                    let i = i as u16;
+                    if a.is_option {
+                        let inner_ty = extract_option_inner(ty);
+                        quote! {
+                            let #var_name: #ty = __arg_map.get(&#i)
+                                .map(|(wt, data)| {
+                                    if *wt == rsmp::WireType::None {
+                                        Ok(None)
+                                    } else {
+                                        <#inner_ty as rsmp::Decode>::decode(*wt, data).map(Some)
+                                    }
+                                })
+                                .transpose()?
+                                .flatten();
+                        }
+                    } else {
+                        quote! {
+                            let #var_name: #ty = __arg_map.get(&#i)
+                                .ok_or(rsmp::ProtocolError::MissingField(#i))
+                                .and_then(|(wt, data)| <#ty as rsmp::Decode>::decode(*wt, data))?;
+                        }
+                    }
+                })
+                .collect();
+
+            let call_args: Vec<_> = m
+                .args
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    let var_name = format_ident!("__arg_{}", i);
+                    quote! { #var_name }
+                })
+                .collect();
+
+            match (m.has_request_stream, m.has_response_stream) {
+                (true, true) => quote! {
+                    #idx => {
+                        #(#decode_args)*
+                        match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                            Ok((result, _resp_size)) => {
+                                let response = rsmp::Args::encode_args(&result);
+                                __stream.write_all(&(response.len() as u32).to_be_bytes()).await?;
+                                __stream.write_all(&response).await?;
+                            }
+                            Err(e) => {
+                                __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
+                                let err_data = rsmp::Args::encode_args(&e);
+                                __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await?;
+                                __stream.write_all(&err_data).await?;
+                            }
+                        }
+                    }
+                },
+                (true, false) => quote! {
+                    #idx => {
+                        #(#decode_args)*
+                        match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                            Ok(result) => {
+                                let response = rsmp::Args::encode_args(&result);
+                                __stream.write_all(&(response.len() as u32).to_be_bytes()).await?;
+                                __stream.write_all(&response).await?;
+                            }
+                            Err(e) => {
+                                let err_data = rsmp::Args::encode_args(&e);
+                                __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await?;
+                                __stream.write_all(&err_data).await?;
+                            }
+                        }
+                    }
+                },
+                (false, true) => quote! {
+                    #idx => {
+                        #(#decode_args)*
+                        match __handler.#name(#(#call_args,)* __stream).await {
+                            Ok((_result, _resp_size)) => {}
+                            Err(e) => {
+                                __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
+                                let err_data = rsmp::Args::encode_args(&e);
+                                __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await?;
+                                __stream.write_all(&err_data).await?;
+                            }
+                        }
+                    }
+                },
+                (false, false) => quote! {
+                    #idx => {
+                        #(#decode_args)*
+                        match __handler.#name(#(#call_args),*).await {
+                            Ok(result) => {
+                                let response = rsmp::Args::encode_args(&result);
+                                __stream.write_all(&(response.len() as u32).to_be_bytes()).await?;
+                                __stream.write_all(&response).await?;
+                            }
+                            Err(e) => {
+                                let err_data = rsmp::Args::encode_args(&e);
+                                __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await?;
+                                __stream.write_all(&err_data).await?;
+                            }
+                        }
+                    }
+                },
+            }
+        })
+        .collect();
+
+    let client_methods: Vec<_> = methods
+        .iter()
+        .map(|m| {
+            let name = &m.name;
+            let idx = m.idx;
+            let base_return_ty = extract_base_response_type(&m.return_ty);
+            let err_ty = &error_ty_tokens;
+
+            let client_params: Vec<_> = m
+                .args
+                .iter()
+                .map(|a| {
+                    let name = &a.name;
+                    let ty = &a.ty;
+                    quote! { #name: &#ty }
+                })
+                .collect();
+
+            let encode_args: Vec<_> = m
+                .args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let name = &a.name;
+                    let i = i as u16;
+                    if a.is_option {
+                        quote! {
+                            match #name {
+                                Some(v) => {
+                                    let mut __field_data = Vec::new();
+                                    rsmp::Encode::encode(v, &mut __field_data);
+                                    rsmp::write_field(&mut __buf, #i, rsmp::Encode::wire_type(v), &__field_data);
+                                }
+                                None => {
+                                    rsmp::write_field(&mut __buf, #i, rsmp::WireType::None, &[]);
+                                }
+                            }
+                        }
+                    } else {
+                        quote! {
+                            {
+                                let mut __field_data = Vec::new();
+                                rsmp::Encode::encode(#name, &mut __field_data);
+                                rsmp::write_field(&mut __buf, #i, rsmp::Encode::wire_type(#name), &__field_data);
+                            }
+                        }
+                    }
+                })
+                .collect();
+
+            let field_count = m.args.len() as u16;
+
+            let encode_block = quote! {
+                let mut __buf = Vec::new();
+                __buf.extend_from_slice(&(#field_count as u16).to_be_bytes());
+                #(#encode_args)*
+            };
+
+            if m.has_request_stream && m.has_response_stream {
+                quote! {
+                    pub async fn #name<R: rsmp::AsyncRead + Unpin>(
+                        &mut self,
+                        #(#client_params,)*
+                        mut body: rsmp::BodyStream<R>,
+                    ) -> Result<(#base_return_ty, rsmp::BoxAsyncRead<'_>), rsmp::ClientError<#err_ty>> {
+                        #encode_block
+                        match self.transport
+                            .call_with_body_and_response_stream_raw(#idx, &__buf, &mut body.reader, body.size)
+                            .await?
+                        {
+                            Ok((response_data, stream)) => {
+                                let response = <#base_return_ty as rsmp::Args>::decode_args(&response_data)?;
+                                Ok((response, stream))
+                            }
+                            Err(err_data) => {
+                                let err = <#err_ty as rsmp::Args>::decode_args(&err_data)?;
+                                Err(rsmp::ClientError::Server(err))
+                            }
+                        }
+                    }
+                }
+            } else if m.has_request_stream {
+                quote! {
+                    pub async fn #name<R: rsmp::AsyncRead + Unpin>(
+                        &mut self,
+                        #(#client_params,)*
+                        mut body: rsmp::BodyStream<R>,
+                    ) -> Result<#base_return_ty, rsmp::ClientError<#err_ty>> {
+                        #encode_block
+                        match self.transport
+                            .call_with_body_raw(#idx, &__buf, &mut body.reader, body.size)
+                            .await?
+                        {
+                            rsmp::Response::Ok(response_data) => {
+                                Ok(<#base_return_ty as rsmp::Args>::decode_args(&response_data)?)
+                            }
+                            rsmp::Response::Err(err_data) => {
+                                let err = <#err_ty as rsmp::Args>::decode_args(&err_data)?;
+                                Err(rsmp::ClientError::Server(err))
+                            }
+                        }
+                    }
+                }
+            } else if m.has_response_stream {
+                quote! {
+                    pub async fn #name(
+                        &mut self,
+                        #(#client_params,)*
+                    ) -> Result<(#base_return_ty, rsmp::BoxAsyncRead<'_>), rsmp::ClientError<#err_ty>> {
+                        #encode_block
+                        match self.transport
+                            .call_with_response_stream_raw(#idx, &__buf)
+                            .await?
+                        {
+                            Ok(stream) => {
+                                Ok((#base_return_ty, stream))
+                            }
+                            Err(err_data) => {
+                                let err = <#err_ty as rsmp::Args>::decode_args(&err_data)?;
+                                Err(rsmp::ClientError::Server(err))
+                            }
+                        }
+                    }
+                }
+            } else {
+                quote! {
+                    pub async fn #name(&mut self, #(#client_params),*) -> Result<#base_return_ty, rsmp::ClientError<#err_ty>> {
+                        #encode_block
+                        match self.transport.call_raw(#idx, &__buf).await? {
+                            rsmp::Response::Ok(response_data) => {
+                                Ok(<#base_return_ty as rsmp::Args>::decode_args(&response_data)?)
+                            }
+                            rsmp::Response::Err(err_data) => {
+                                let err = <#err_ty as rsmp::Args>::decode_args(&err_data)?;
+                                Err(rsmp::ClientError::Server(err))
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let has_stream_arms = methods.iter().filter(|m| m.has_request_stream).map(|m| {
+        let idx = m.idx;
+        quote! { #idx => true, }
+    });
+
+    let vis = &input.vis;
+
+    Ok(quote! {
+        #vis mod #mod_name {
+            use super::*;
+
+            #(#method_consts)*
+
+            pub fn has_request_stream(__method_id: u16) -> bool {
+                match __method_id {
+                    #(#has_stream_arms)*
+                    _ => false,
+                }
+            }
+
+            pub fn parse_args(__data: &[u8]) -> Result<std::collections::HashMap<u16, (rsmp::WireType, &[u8])>, rsmp::ProtocolError> {
+                if __data.len() < 2 {
+                    return Err(rsmp::ProtocolError::UnexpectedEof);
+                }
+                let field_count = u16::from_be_bytes([__data[0], __data[1]]);
+                let mut offset = 2usize;
+                let mut map = std::collections::HashMap::new();
+                for _ in 0..field_count {
+                    let (idx, wire_type, bytes, consumed) = rsmp::read_field(&__data[offset..])?;
+                    offset += consumed;
+                    map.insert(idx, (wire_type, bytes));
+                }
+                Ok(map)
+            }
+
+            pub async fn dispatch<H, C>(
+                __handler: &H,
+                __stream: &mut C,
+                __frame: rsmp::RequestFrame,
+            ) -> Result<(), rsmp::ServiceError>
+            where
+                H: #handler_name<C>,
+                C: rsmp::AsyncStreamCompat,
+            {
+                let __arg_map = parse_args(&__frame.args_data)?;
+                let __req_size = __frame.body_size;
+                match __frame.method_id {
+                    #(#dispatch_arms)*
+                    _ => return Err(rsmp::ServiceError::MethodNotFound(__frame.method_id)),
+                }
+                Ok(())
+            }
+
+            pub async fn dispatch_local<H, C>(
+                __handler: &H,
+                __stream: &mut C,
+                __frame: rsmp::RequestFrame,
+            ) -> Result<(), rsmp::ServiceError>
+            where
+                H: #local_handler_name<C>,
+                C: rsmp::AsyncStreamCompat,
+            {
+                let __arg_map = parse_args(&__frame.args_data)?;
+                let __req_size = __frame.body_size;
+                match __frame.method_id {
+                    #(#dispatch_arms)*
+                    _ => return Err(rsmp::ServiceError::MethodNotFound(__frame.method_id)),
+                }
+                Ok(())
+            }
+        }
+
+        #[rsmp::async_trait]
+        #vis trait #handler_name<C: rsmp::AsyncStreamCompat>: Send + Sync {
+            #(#handler_methods)*
+        }
+
+        #[rsmp::async_trait(?Send)]
+        #vis trait #local_handler_name<C: rsmp::AsyncStreamCompat> {
+            #(#handler_methods)*
+        }
+
+        #vis struct #client_name<T: rsmp::Transport> {
+            transport: T,
+        }
+
+        impl<T: rsmp::Transport> #client_name<T> {
+            pub fn new(transport: T) -> Self {
+                Self { transport }
+            }
+
+            #(#client_methods)*
         }
     })
 }

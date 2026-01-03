@@ -1,73 +1,41 @@
-use std::io;
-
 use rsmp::prelude::*;
-use thiserror::Error;
 
-#[derive(Error, Debug, strum::AsRefStr, strum::EnumDiscriminants)]
-#[strum(serialize_all = "snake_case")]
-#[strum_discriminants(repr(u16))]
-pub enum RequestError {
-    #[error("not found")]
-    NotFound,
-    #[error("decode error: {0}")]
-    Decode(#[from] ProtocolError),
-    #[error("io error: {0}")]
-    Io(#[from] io::Error),
-}
+#[derive(Args, Debug)]
+pub struct SuccessResponse;
 
-#[derive(Args, strum::AsRefStr)]
-#[strum(serialize_all = "snake_case")]
-pub enum Command {
-    #[field(idx = 0)]
-    Get(GetArgs),
-    #[field(idx = 1)]
-    Put(PutArgs),
-}
+#[derive(Args, Debug)]
+pub struct GetResponse;
 
-#[derive(Args)]
-pub struct GetArgs {
+#[derive(Args, Debug)]
+pub struct NotFoundError {
     #[field(idx = 0)]
     pub id: String,
-    #[field(idx = 1)]
-    pub offset: u64,
-    #[field(idx = 2)]
-    pub size: u64,
-}
-
-#[derive(Args)]
-pub struct PutArgs {
-    #[field(idx = 0)]
-    pub id: String,
-    #[field(idx = 1)]
-    pub stream: Stream,
 }
 
 #[derive(Args, Debug)]
-pub struct SuccessResponse {
+pub struct IoError {
     #[field(idx = 0)]
-    pub data: Vec<u8>,
-}
-
-#[derive(Args, Debug)]
-pub struct StreamHeaderResponse {
-    #[field(idx = 0)]
-    pub stream: Stream,
-}
-
-#[derive(Args, Debug)]
-pub struct ErrorResponse {
-    #[field(idx = 0)]
-    pub code: u16,
-    #[field(idx = 1)]
     pub message: String,
 }
 
 #[derive(Args, Debug)]
-pub enum Response {
-    #[field(idx = 0)]
-    Success(SuccessResponse),
+pub enum CacheError {
     #[field(idx = 1)]
-    StreamHeader(StreamHeaderResponse),
+    NotFound(NotFoundError),
     #[field(idx = 2)]
-    Error(ErrorResponse),
+    Io(IoError),
+}
+
+impl From<std::io::Error> for CacheError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(IoError {
+            message: e.to_string(),
+        })
+    }
+}
+
+#[rsmp::service(error = CacheError)]
+pub trait CacheService {
+    async fn get(&self, id: String, offset: u64, size: u64) -> (GetResponse, Stream);
+    async fn put(&self, id: String, body: Stream) -> SuccessResponse;
 }

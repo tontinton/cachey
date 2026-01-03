@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 rsmp-derive = { path = "../rsmp-derive" }
 thiserror = "2.0"
+futures-io = "0.3"
+async-trait = "0.1"
+pin-project = "1.0"
