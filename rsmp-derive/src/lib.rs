@@ -962,7 +962,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 .map(|a| {
                     let name = &a.name;
                     let ty = &a.ty;
-                    quote! { #name: &#ty }
+                    quote! { #name: #ty }
                 })
                 .collect();
 
@@ -974,7 +974,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     let name = &a.name;
                     if a.is_option {
                         quote! {
-                            match #name {
+                            match &#name {
                                 Some(v) => {
                                     let mut __field_data = Vec::new();
                                     rsmp::Encode::encode(v, &mut __field_data);
@@ -989,8 +989,8 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                         quote! {
                             {
                                 let mut __field_data = Vec::new();
-                                rsmp::Encode::encode(#name, &mut __field_data);
-                                rsmp::write_field(&mut __buf, #i as rsmp::FieldIndex, rsmp::Encode::wire_type(#name), &__field_data);
+                                rsmp::Encode::encode(&#name, &mut __field_data);
+                                rsmp::write_field(&mut __buf, #i as rsmp::FieldIndex, rsmp::Encode::wire_type(&#name), &__field_data);
                             }
                         }
                     }

@@ -129,15 +129,15 @@ async fn run_client_test<S: rsmp::AsyncRead + rsmp::AsyncWrite + Unpin>(
 ) {
     client
         .put(
-            &"test-file".to_string(),
-            &None,
+            "test-file".to_string(),
+            None,
             Stream::new(TEST_DATA, TEST_DATA.len() as u64),
         )
         .await
         .unwrap();
 
     let mut body = client
-        .get(&"test-file".to_string(), &0u64, &(TEST_DATA.len() as u64))
+        .get("test-file".to_string(), 0, TEST_DATA.len() as u64)
         .await
         .unwrap();
 
@@ -149,7 +149,7 @@ async fn run_client_test<S: rsmp::AsyncRead + rsmp::AsyncWrite + Unpin>(
 async fn run_not_found_test<S: rsmp::AsyncRead + rsmp::AsyncWrite + Unpin>(
     client: &mut CacheServiceClient<rsmp::StreamTransport<S>>,
 ) {
-    match client.get(&"nonexistent".to_string(), &0u64, &100u64).await {
+    match client.get("nonexistent".to_string(), 0, 100).await {
         Err(rsmp::ClientError::Server(cachey::proto::CacheError::NotFound(err))) => {
             assert_eq!(err.id, "nonexistent");
         }
@@ -224,21 +224,21 @@ fn put_and_get_verifies_disk_cache_metrics() {
             let mut client = CacheServiceClient::from_stream(stream.compat());
 
             {
-                let result = client.get(&"missing".to_string(), &0u64, &100u64).await;
+                let result = client.get("missing".to_string(), 0, 100).await;
                 assert!(result.is_err());
             }
 
             client
                 .put(
-                    &"file1".to_string(),
-                    &None,
+                    "file1".to_string(),
+                    None,
                     Stream::new(TEST_DATA, TEST_DATA.len() as u64),
                 )
                 .await
                 .unwrap();
 
             let mut body = client
-                .get(&"file1".to_string(), &0u64, &(TEST_DATA.len() as u64))
+                .get("file1".to_string(), 0, TEST_DATA.len() as u64)
                 .await
                 .unwrap();
             let mut data = vec![0u8; TEST_DATA.len()];
@@ -269,8 +269,8 @@ fn put_with_cache_ranges_populates_memory_cache() {
             let memory_cache_ranges: MemoryCacheRanges = vec![0u64..100, 500..600].into();
             client
                 .put(
-                    &"file1".to_string(),
-                    &Some(memory_cache_ranges),
+                    "file1".to_string(),
+                    Some(memory_cache_ranges),
                     Stream::from_vec(data.clone()),
                 )
                 .await
@@ -305,8 +305,8 @@ fn get_hits_memory_cache_before_disk() {
             let memory_cache_ranges: MemoryCacheRanges = vec![0u64..100].into();
             client
                 .put(
-                    &"file1".to_string(),
-                    &Some(memory_cache_ranges),
+                    "file1".to_string(),
+                    Some(memory_cache_ranges),
                     Stream::from_vec(data.clone()),
                 )
                 .await
@@ -316,7 +316,7 @@ fn get_hits_memory_cache_before_disk() {
             assert_eq!(server.disk_cache.hits(), 0);
 
             let mut body = client
-                .get(&"file1".to_string(), &0u64, &100u64)
+                .get("file1".to_string(), 0, 100)
                 .await
                 .unwrap();
             let mut received = vec![0u8; 100];
@@ -347,15 +347,15 @@ fn get_falls_back_to_disk_on_memory_miss() {
             let memory_cache_ranges: MemoryCacheRanges = vec![0u64..100].into();
             client
                 .put(
-                    &"file1".to_string(),
-                    &Some(memory_cache_ranges),
+                    "file1".to_string(),
+                    Some(memory_cache_ranges),
                     Stream::from_vec(data.clone()),
                 )
                 .await
                 .unwrap();
 
             let mut body = client
-                .get(&"file1".to_string(), &200u64, &100u64)
+                .get("file1".to_string(), 200, 100)
                 .await
                 .unwrap();
             let mut received = vec![0u8; 100];
@@ -383,29 +383,19 @@ fn get_partial_file_from_disk() {
             let mut client = CacheServiceClient::from_stream(stream.compat());
 
             client
-                .put(
-                    &"bigfile".to_string(),
-                    &None,
-                    Stream::from_vec(data.clone()),
-                )
+                .put("bigfile".to_string(), None, Stream::from_vec(data.clone()))
                 .await
                 .unwrap();
 
             {
-                let mut body = client
-                    .get(&"bigfile".to_string(), &0u64, &256u64)
-                    .await
-                    .unwrap();
+                let mut body = client.get("bigfile".to_string(), 0, 256).await.unwrap();
                 let mut received = vec![0u8; 256];
                 body.read_exact(&mut received).await.unwrap();
                 assert_eq!(received, &data[0..256]);
             }
 
             {
-                let mut body = client
-                    .get(&"bigfile".to_string(), &5000u64, &1000u64)
-                    .await
-                    .unwrap();
+                let mut body = client.get("bigfile".to_string(), 5000, 1000).await.unwrap();
                 let mut received = vec![0u8; 1000];
                 body.read_exact(&mut received).await.unwrap();
                 assert_eq!(received, &data[5000..6000]);
@@ -427,14 +417,11 @@ fn get_range_past_eof_returns_partial_data() {
             let mut client = CacheServiceClient::from_stream(stream.compat());
 
             client
-                .put(&"small".to_string(), &None, Stream::from_vec(data.clone()))
+                .put("small".to_string(), None, Stream::from_vec(data.clone()))
                 .await
                 .unwrap();
 
-            let mut body = client
-                .get(&"small".to_string(), &50u64, &200u64)
-                .await
-                .unwrap();
+            let mut body = client.get("small".to_string(), 50, 200).await.unwrap();
 
             let mut received = Vec::new();
             body.read_to_end(&mut received).await.unwrap();
@@ -463,8 +450,8 @@ fn sequential_requests_complete_under_memory_pressure() {
 
             client
                 .put(
-                    &"pressure-test".to_string(),
-                    &None,
+                    "pressure-test".to_string(),
+                    None,
                     Stream::from_vec(data.clone()),
                 )
                 .await
@@ -472,7 +459,7 @@ fn sequential_requests_complete_under_memory_pressure() {
 
             for _ in 0..3 {
                 let mut body = client
-                    .get(&"pressure-test".to_string(), &0u64, &(256 * 1024u64))
+                    .get("pressure-test".to_string(), 0, 256 * 1024)
                     .await
                     .unwrap();
 
