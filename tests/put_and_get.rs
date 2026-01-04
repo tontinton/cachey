@@ -10,7 +10,7 @@ use cachey::args::Args as ServerArgs;
 use cachey::cache::{DiskCache, MemoryCache};
 use cachey::proto::{CacheServiceClient, MemoryCacheRanges};
 use futures_util::AsyncReadExt;
-use rsmp::{Stream, StreamTransport, Transport};
+use rsmp::Stream;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 const TEST_DATA: &[u8] = b"Hello, rsmp protocol!";
@@ -109,7 +109,7 @@ impl Drop for TestServer {
     }
 }
 
-async fn run_client_test<T: Transport>(client: &mut CacheServiceClient<T>) {
+async fn run_client_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>) {
     client
         .put(
             &"test-file".to_string(),
@@ -129,7 +129,7 @@ async fn run_client_test<T: Transport>(client: &mut CacheServiceClient<T>) {
     assert_eq!(data, TEST_DATA);
 }
 
-async fn run_not_found_test<T: Transport>(client: &mut CacheServiceClient<T>) {
+async fn run_not_found_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>) {
     match client.get(&"nonexistent".to_string(), &0u64, &100u64).await {
         Err(rsmp::ClientError::Server(cachey::proto::CacheError::NotFound(err))) => {
             assert_eq!(err.id, "nonexistent");
@@ -157,7 +157,7 @@ fn put_and_get_tokio() {
         .unwrap()
         .block_on(async {
             let stream = connect_tokio(server.addr()).await;
-            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+            let mut client = CacheServiceClient::from_stream(stream.compat());
             run_not_found_test(&mut client).await;
             run_client_test(&mut client).await;
             run_not_found_test(&mut client).await;
@@ -172,7 +172,7 @@ fn put_and_get_compio() {
     rt.block_on(async {
         let stream = connect_compio(server.addr()).await;
         let compat_stream = compio::io::compat::AsyncStream::new(stream);
-        let mut client = CacheServiceClient::new(StreamTransport::new(compat_stream));
+        let mut client = CacheServiceClient::from_stream(compat_stream);
         run_not_found_test(&mut client).await;
         run_client_test(&mut client).await;
         run_not_found_test(&mut client).await;
@@ -202,7 +202,7 @@ fn put_and_get_verifies_disk_cache_metrics() {
         .unwrap()
         .block_on(async {
             let stream = connect_tokio(server.addr()).await;
-            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             {
                 let result = client.get(&"missing".to_string(), &0u64, &100u64).await;
@@ -245,7 +245,7 @@ fn put_with_cache_ranges_populates_memory_cache() {
         .unwrap()
         .block_on(async {
             let stream = connect_tokio(server.addr()).await;
-            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             let memory_cache_ranges: MemoryCacheRanges = vec![0u64..100, 500..600].into();
             client
@@ -280,7 +280,7 @@ fn get_hits_memory_cache_before_disk() {
         .unwrap()
         .block_on(async {
             let stream = connect_tokio(server.addr()).await;
-            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             #[allow(clippy::single_range_in_vec_init)]
             let memory_cache_ranges: MemoryCacheRanges = vec![0u64..100].into();
@@ -322,7 +322,7 @@ fn get_falls_back_to_disk_on_memory_miss() {
         .unwrap()
         .block_on(async {
             let stream = connect_tokio(server.addr()).await;
-            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             #[allow(clippy::single_range_in_vec_init)]
             let memory_cache_ranges: MemoryCacheRanges = vec![0u64..100].into();
@@ -361,7 +361,7 @@ fn get_partial_file_from_disk() {
         .unwrap()
         .block_on(async {
             let stream = connect_tokio(server.addr()).await;
-            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             client
                 .put(
@@ -405,7 +405,7 @@ fn get_range_past_eof_returns_partial_data() {
         .unwrap()
         .block_on(async {
             let stream = connect_tokio(server.addr()).await;
-            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             client
                 .put(&"small".to_string(), &None, Stream::from_vec(data.clone()))
@@ -440,7 +440,7 @@ fn sequential_requests_complete_under_memory_pressure() {
         .unwrap()
         .block_on(async {
             let stream = connect_tokio(server.addr()).await;
-            let mut client = CacheServiceClient::new(StreamTransport::new(stream.compat()));
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             client
                 .put(

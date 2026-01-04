@@ -1384,5 +1384,11 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
 
             #(#client_methods)*
         }
+
+        impl<S: rsmp::futures_util::io::AsyncRead + rsmp::futures_util::io::AsyncWrite + Unpin> #client_name<rsmp::StreamTransport<S>> {
+            pub fn from_stream(stream: S) -> Self {
+                Self::new(rsmp::StreamTransport::new(stream))
+            }
+        }
     })
 }
