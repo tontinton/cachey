@@ -1010,11 +1010,12 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     pub async fn #name(
                         &mut self,
                         #(#client_params,)*
-                        mut body: rsmp::Stream,
-                    ) -> Result<rsmp::BoxAsyncRead<'_>, rsmp::ClientError<#err_ty>> {
+                        body: T::Stream,
+                    ) -> Result<T::BoxRead<'_>, rsmp::ClientError<#err_ty>> {
                         #encode_block
+                        let (mut __body_reader, __body_size) = rsmp::StreamLike::into_parts(body);
                         match self.transport
-                            .call_with_body_and_response_stream_raw(#idx, &__buf, &mut *body.reader, body.size)
+                            .call_with_body_and_response_stream_raw(#idx, &__buf, &mut *__body_reader, __body_size)
                             .await?
                         {
                             Ok((_response_data, stream)) => Ok(stream),
@@ -1031,11 +1032,12 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                         pub async fn #name(
                             &mut self,
                             #(#client_params,)*
-                            mut body: rsmp::Stream,
+                            body: T::Stream,
                         ) -> Result<#resp_ty, rsmp::ClientError<#err_ty>> {
                             #encode_block
+                            let (mut __body_reader, __body_size) = rsmp::StreamLike::into_parts(body);
                             match self.transport
-                                .call_with_body_raw(#idx, &__buf, &mut *body.reader, body.size)
+                                .call_with_body_raw(#idx, &__buf, &mut *__body_reader, __body_size)
                                 .await?
                             {
                                 rsmp::Response::Ok(response_data) => {
@@ -1053,11 +1055,12 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     pub async fn #name(
                         &mut self,
                         #(#client_params,)*
-                        mut body: rsmp::Stream,
+                        body: T::Stream,
                     ) -> Result<(), rsmp::ClientError<#err_ty>> {
                         #encode_block
+                        let (mut __body_reader, __body_size) = rsmp::StreamLike::into_parts(body);
                         match self.transport
-                            .call_with_body_raw(#idx, &__buf, &mut *body.reader, body.size)
+                            .call_with_body_raw(#idx, &__buf, &mut *__body_reader, __body_size)
                             .await?
                         {
                             rsmp::Response::Ok(_) => Ok(()),
@@ -1074,7 +1077,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                         pub async fn #name(
                             &mut self,
                             #(#client_params,)*
-                        ) -> Result<(#resp_ty, rsmp::BoxAsyncRead<'_>), rsmp::ClientError<#err_ty>> {
+                        ) -> Result<(#resp_ty, T::BoxRead<'_>), rsmp::ClientError<#err_ty>> {
                             #encode_block
                             match self.transport
                                 .call_with_response_stream_raw(#idx, &__buf)
@@ -1093,7 +1096,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     pub async fn #name(
                         &mut self,
                         #(#client_params,)*
-                    ) -> Result<rsmp::BoxAsyncRead<'_>, rsmp::ClientError<#err_ty>> {
+                    ) -> Result<T::BoxRead<'_>, rsmp::ClientError<#err_ty>> {
                         #encode_block
                         match self.transport
                             .call_with_response_stream_raw(#idx, &__buf)

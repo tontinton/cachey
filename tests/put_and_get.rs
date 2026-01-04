@@ -109,7 +109,9 @@ impl Drop for TestServer {
     }
 }
 
-async fn run_client_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>) {
+async fn run_client_test<S: rsmp::AsyncRead + rsmp::AsyncWrite + Unpin>(
+    client: &mut CacheServiceClient<rsmp::StreamTransport<S>>,
+) {
     client
         .put(
             &"test-file".to_string(),
@@ -129,7 +131,9 @@ async fn run_client_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>)
     assert_eq!(data, TEST_DATA);
 }
 
-async fn run_not_found_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>) {
+async fn run_not_found_test<S: rsmp::AsyncRead + rsmp::AsyncWrite + Unpin>(
+    client: &mut CacheServiceClient<rsmp::StreamTransport<S>>,
+) {
     match client.get(&"nonexistent".to_string(), &0u64, &100u64).await {
         Err(rsmp::ClientError::Server(cachey::proto::CacheError::NotFound(err))) => {
             assert_eq!(err.id, "nonexistent");
