@@ -13,7 +13,7 @@ pub use rsmp_derive::{Args, handler, local_handler, local_stream_compat, service
 
 pub mod transport;
 
-pub use transport::{SendStreamTransport, StreamTransport};
+pub use transport::{StreamTransport, StreamTransportLocal};
 
 pub type FieldIndex = u16;
 const FIELD_INDEX_SIZE: usize = std::mem::size_of::<FieldIndex>();
@@ -82,47 +82,11 @@ pub trait StreamLike {
 }
 
 pub struct Stream {
-    pub reader: Box<dyn AsyncRead + Unpin>,
-    pub size: u64,
-}
-
-impl Stream {
-    pub fn new<R: AsyncRead + Unpin + 'static>(reader: R, size: u64) -> Self {
-        Self {
-            reader: Box::new(reader),
-            size,
-        }
-    }
-
-    pub fn from_vec(data: Vec<u8>) -> Self {
-        let size = data.len() as u64;
-        Self {
-            reader: Box::new(futures_util::io::Cursor::new(data)),
-            size,
-        }
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            reader: Box::new(futures_util::io::empty()),
-            size: 0,
-        }
-    }
-}
-
-impl StreamLike for Stream {
-    type Body = dyn AsyncRead + Unpin;
-    fn into_parts(self) -> (Box<Self::Body>, u64) {
-        (self.reader, self.size)
-    }
-}
-
-pub struct StreamSend {
     pub reader: Box<dyn AsyncRead + Unpin + Send>,
     pub size: u64,
 }
 
-impl StreamSend {
+impl Stream {
     pub fn new<R: AsyncRead + Unpin + Send + 'static>(reader: R, size: u64) -> Self {
         Self {
             reader: Box::new(reader),
@@ -146,8 +110,44 @@ impl StreamSend {
     }
 }
 
-impl StreamLike for StreamSend {
+impl StreamLike for Stream {
     type Body = dyn AsyncRead + Unpin + Send;
+    fn into_parts(self) -> (Box<Self::Body>, u64) {
+        (self.reader, self.size)
+    }
+}
+
+pub struct StreamLocal {
+    pub reader: Box<dyn AsyncRead + Unpin>,
+    pub size: u64,
+}
+
+impl StreamLocal {
+    pub fn new<R: AsyncRead + Unpin + 'static>(reader: R, size: u64) -> Self {
+        Self {
+            reader: Box::new(reader),
+            size,
+        }
+    }
+
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        let size = data.len() as u64;
+        Self {
+            reader: Box::new(futures_util::io::Cursor::new(data)),
+            size,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            reader: Box::new(futures_util::io::empty()),
+            size: 0,
+        }
+    }
+}
+
+impl StreamLike for StreamLocal {
+    type Body = dyn AsyncRead + Unpin;
     fn into_parts(self) -> (Box<Self::Body>, u64) {
         (self.reader, self.size)
     }
@@ -266,8 +266,8 @@ impl<E: std::fmt::Debug> From<io::Error> for ClientError<E> {
     }
 }
 
-pub type BoxAsyncRead<'a> = Pin<Box<dyn AsyncRead + 'a>>;
-pub type BoxAsyncReadSend<'a> = Pin<Box<dyn AsyncRead + Send + 'a>>;
+pub type BoxAsyncRead<'a> = Pin<Box<dyn AsyncRead + Send + 'a>>;
+pub type BoxAsyncReadLocal<'a> = Pin<Box<dyn AsyncRead + 'a>>;
 
 #[async_trait(?Send)]
 pub trait AsyncStreamCompat {
@@ -280,8 +280,6 @@ pub use transport::Response;
 pub type StreamResult<T> = Result<Result<T, Vec<u8>>, TransportError>;
 
 pub trait Transport {
-    type Stream: StreamLike<Body = Self::Body>;
-    type Body: AsyncRead + Unpin + ?Sized;
     type BoxRead<'a>: AsyncRead + Unpin
     where
         Self: 'a;
@@ -292,11 +290,11 @@ pub trait Transport {
         args_data: &[u8],
     ) -> impl Future<Output = Result<Response, TransportError>>;
 
-    fn call_with_body_raw(
+    fn call_with_body_raw<B: AsyncRead + Unpin + ?Sized>(
         &mut self,
         method_id: u16,
         args_data: &[u8],
-        body: &mut Self::Body,
+        body: &mut B,
         body_size: u64,
     ) -> impl Future<Output = Result<Response, TransportError>>;
 
@@ -312,11 +310,11 @@ pub trait Transport {
         args_data: &[u8],
     ) -> impl Future<Output = StreamResult<(Vec<u8>, Self::BoxRead<'_>)>>;
 
-    fn call_with_body_and_response_stream_raw(
+    fn call_with_body_and_response_stream_raw<B: AsyncRead + Unpin + ?Sized>(
         &mut self,
         method_id: u16,
         args_data: &[u8],
-        body: &mut Self::Body,
+        body: &mut B,
         body_size: u64,
     ) -> impl Future<Output = StreamResult<(Vec<u8>, Self::BoxRead<'_>)>>;
 }

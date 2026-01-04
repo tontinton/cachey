@@ -124,9 +124,7 @@ impl Drop for TestServer {
     }
 }
 
-async fn run_client_test<S: rsmp::AsyncRead + rsmp::AsyncWrite + Unpin>(
-    client: &mut CacheServiceClient<rsmp::StreamTransport<S>>,
-) {
+async fn run_client_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>) {
     client
         .put(
             "test-file",
@@ -136,19 +134,17 @@ async fn run_client_test<S: rsmp::AsyncRead + rsmp::AsyncWrite + Unpin>(
         .await
         .unwrap();
 
-    let mut body = client
+    let mut response = client
         .get("test-file", 0, TEST_DATA.len() as u64)
         .await
         .unwrap();
 
     let mut data = vec![0u8; TEST_DATA.len()];
-    body.read_exact(&mut data).await.unwrap();
+    response.read_exact(&mut data).await.unwrap();
     assert_eq!(data, TEST_DATA);
 }
 
-async fn run_not_found_test<S: rsmp::AsyncRead + rsmp::AsyncWrite + Unpin>(
-    client: &mut CacheServiceClient<rsmp::StreamTransport<S>>,
-) {
+async fn run_not_found_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>) {
     match client.get("nonexistent", 0, 100).await {
         Err(rsmp::ClientError::Server(cachey::proto::CacheError::NotFound(err))) => {
             assert_eq!(err.id, "nonexistent");
@@ -191,7 +187,7 @@ fn put_and_get_compio() {
     rt.block_on(async {
         let stream = connect_compio(server.addr()).await;
         let compat_stream = compio::io::compat::AsyncStream::new(stream);
-        let mut client = CacheServiceClient::from_stream(compat_stream);
+        let mut client = CacheServiceClient::from_stream_local(compat_stream);
         run_not_found_test(&mut client).await;
         run_client_test(&mut client).await;
         run_not_found_test(&mut client).await;
@@ -315,10 +311,7 @@ fn get_hits_memory_cache_before_disk() {
             assert_eq!(server.memory_cache.hits(), 0);
             assert_eq!(server.disk_cache.hits(), 0);
 
-            let mut body = client
-                .get("file1", 0, 100)
-                .await
-                .unwrap();
+            let mut body = client.get("file1", 0, 100).await.unwrap();
             let mut received = vec![0u8; 100];
             body.read_exact(&mut received).await.unwrap();
 
@@ -354,10 +347,7 @@ fn get_falls_back_to_disk_on_memory_miss() {
                 .await
                 .unwrap();
 
-            let mut body = client
-                .get("file1", 200, 100)
-                .await
-                .unwrap();
+            let mut body = client.get("file1", 200, 100).await.unwrap();
             let mut received = vec![0u8; 100];
             body.read_exact(&mut received).await.unwrap();
 
@@ -449,19 +439,12 @@ fn sequential_requests_complete_under_memory_pressure() {
             let mut client = CacheServiceClient::from_stream(stream.compat());
 
             client
-                .put(
-                    "pressure-test",
-                    None,
-                    Stream::from_vec(data.clone()),
-                )
+                .put("pressure-test", None, Stream::from_vec(data.clone()))
                 .await
                 .unwrap();
 
             for _ in 0..3 {
-                let mut body = client
-                    .get("pressure-test", 0, 256 * 1024)
-                    .await
-                    .unwrap();
+                let mut body = client.get("pressure-test", 0, 256 * 1024).await.unwrap();
 
                 let mut received = Vec::new();
                 body.read_to_end(&mut received).await.unwrap();

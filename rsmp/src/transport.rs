@@ -6,8 +6,7 @@ use std::task::{Context, Poll};
 use futures_io::{AsyncRead, AsyncWrite};
 
 use crate::{
-    BoxAsyncRead, BoxAsyncReadSend, ERROR_MARKER, Stream, StreamResult, StreamSend, Transport,
-    TransportError,
+    BoxAsyncRead, BoxAsyncReadLocal, ERROR_MARKER, StreamResult, Transport, TransportError,
 };
 
 pub enum Response {
@@ -15,25 +14,25 @@ pub enum Response {
     Err(Vec<u8>),
 }
 
-pub struct StreamTransport<S> {
+pub struct StreamTransportLocal<S> {
     stream: S,
 }
 
-impl<S> StreamTransport<S> {
+impl<S> StreamTransportLocal<S> {
     pub fn new(stream: S) -> Self {
         Self { stream }
     }
 }
 
-pub struct SendStreamTransport<S>(StreamTransport<S>);
+pub struct StreamTransport<S>(StreamTransportLocal<S>);
 
-impl<S> SendStreamTransport<S> {
+impl<S> StreamTransport<S> {
     pub fn new(stream: S) -> Self {
-        Self(StreamTransport::new(stream))
+        Self(StreamTransportLocal::new(stream))
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> StreamTransport<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin> StreamTransportLocal<S> {
     async fn write_frame(&mut self, method_id: u16, args_data: &[u8]) -> io::Result<()> {
         let total_len = 2 + args_data.len();
         let len_bytes = (total_len as u32).to_be_bytes();
@@ -99,11 +98,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> StreamTransport<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> Transport for StreamTransport<S> {
-    type Stream = Stream;
-    type Body = dyn AsyncRead + Unpin;
+impl<S: AsyncRead + AsyncWrite + Unpin> Transport for StreamTransportLocal<S> {
     type BoxRead<'a>
-        = BoxAsyncRead<'a>
+        = BoxAsyncReadLocal<'a>
     where
         S: 'a;
 
@@ -116,11 +113,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport for StreamTransport<S> {
         self.read_response().await
     }
 
-    async fn call_with_body_raw(
+    async fn call_with_body_raw<B: AsyncRead + Unpin + ?Sized>(
         &mut self,
         method_id: u16,
         args_data: &[u8],
-        body: &mut Self::Body,
+        body: &mut B,
         body_size: u64,
     ) -> Result<Response, TransportError> {
         self.write_frame(method_id, args_data).await?;
@@ -176,11 +173,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport for StreamTransport<S> {
         )))
     }
 
-    async fn call_with_body_and_response_stream_raw(
+    async fn call_with_body_and_response_stream_raw<B: AsyncRead + Unpin + ?Sized>(
         &mut self,
         method_id: u16,
         args_data: &[u8],
-        body: &mut Self::Body,
+        body: &mut B,
         body_size: u64,
     ) -> StreamResult<(Vec<u8>, Self::BoxRead<'_>)> {
         self.write_frame(method_id, args_data).await?;
@@ -207,11 +204,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport for StreamTransport<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for SendStreamTransport<S> {
-    type Stream = StreamSend;
-    type Body = dyn AsyncRead + Unpin + Send;
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for StreamTransport<S> {
     type BoxRead<'a>
-        = BoxAsyncReadSend<'a>
+        = BoxAsyncRead<'a>
     where
         S: 'a;
 
@@ -224,11 +219,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for SendStreamTransport
         self.0.read_response().await
     }
 
-    async fn call_with_body_raw(
+    async fn call_with_body_raw<B: AsyncRead + Unpin + ?Sized>(
         &mut self,
         method_id: u16,
         args_data: &[u8],
-        body: &mut Self::Body,
+        body: &mut B,
         body_size: u64,
     ) -> Result<Response, TransportError> {
         self.0.write_frame(method_id, args_data).await?;
@@ -284,11 +279,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for SendStreamTransport
         )))
     }
 
-    async fn call_with_body_and_response_stream_raw(
+    async fn call_with_body_and_response_stream_raw<B: AsyncRead + Unpin + ?Sized>(
         &mut self,
         method_id: u16,
         args_data: &[u8],
-        body: &mut Self::Body,
+        body: &mut B,
         body_size: u64,
     ) -> StreamResult<(Vec<u8>, Self::BoxRead<'_>)> {
         self.0.write_frame(method_id, args_data).await?;

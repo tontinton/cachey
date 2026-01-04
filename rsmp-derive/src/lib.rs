@@ -1010,7 +1010,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     pub async fn #name(
                         &mut self,
                         #(#client_params,)*
-                        body: T::Stream,
+                        body: impl rsmp::StreamLike,
                     ) -> Result<T::BoxRead<'_>, rsmp::ClientError<#err_ty>> {
                         #encode_block
                         let (mut __body_reader, __body_size) = rsmp::StreamLike::into_parts(body);
@@ -1032,7 +1032,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                         pub async fn #name(
                             &mut self,
                             #(#client_params,)*
-                            body: T::Stream,
+                            body: impl rsmp::StreamLike,
                         ) -> Result<#resp_ty, rsmp::ClientError<#err_ty>> {
                             #encode_block
                             let (mut __body_reader, __body_size) = rsmp::StreamLike::into_parts(body);
@@ -1055,7 +1055,7 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                     pub async fn #name(
                         &mut self,
                         #(#client_params,)*
-                        body: T::Stream,
+                        body: impl rsmp::StreamLike,
                     ) -> Result<(), rsmp::ClientError<#err_ty>> {
                         #encode_block
                         let (mut __body_reader, __body_size) = rsmp::StreamLike::into_parts(body);
@@ -1388,9 +1388,15 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
             #(#client_methods)*
         }
 
-        impl<S: rsmp::futures_util::io::AsyncRead + rsmp::futures_util::io::AsyncWrite + Unpin> #client_name<rsmp::StreamTransport<S>> {
+        impl<S: rsmp::futures_util::io::AsyncRead + rsmp::futures_util::io::AsyncWrite + Unpin + Send> #client_name<rsmp::StreamTransport<S>> {
             pub fn from_stream(stream: S) -> Self {
                 Self::new(rsmp::StreamTransport::new(stream))
+            }
+        }
+
+        impl<S: rsmp::futures_util::io::AsyncRead + rsmp::futures_util::io::AsyncWrite + Unpin> #client_name<rsmp::StreamTransportLocal<S>> {
+            pub fn from_stream_local(stream: S) -> Self {
+                Self::new(rsmp::StreamTransportLocal::new(stream))
             }
         }
     })
