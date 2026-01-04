@@ -19,7 +19,7 @@ pub struct Args {
     pub num_listeners: u32,
 
     /// Path to the disk cache dir.
-    #[clap(long, default_value = "/tmp/cachey")]
+    #[clap(long, default_value = "/cache")]
     pub disk_path: PathBuf,
 
     /// Disk cache size.
