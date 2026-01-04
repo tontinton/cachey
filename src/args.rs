@@ -11,7 +11,7 @@ pub struct Args {
     pub log_json: bool,
 
     /// Listen address (host:port).
-    #[clap(short, long, default_value = "0.0.0.0:8080")]
+    #[clap(short, long, default_value = "0.0.0.0:80")]
     pub listen: String,
 
     /// The provided value to listen() on the TCP server (man 2 listen).
