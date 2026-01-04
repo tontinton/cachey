@@ -22,6 +22,7 @@ fn get_free_port() -> u16 {
 
 struct TestServer {
     addr: String,
+    metrics_addr: String,
     disk_cache: Arc<DiskCache>,
     memory_cache: Arc<MemoryCache>,
     shutdown_tx: async_broadcast::Sender<()>,
@@ -51,7 +52,7 @@ impl TestServer {
             disk_path: temp_dir.path().to_path_buf(),
             disk_cache_size: ByteSize::mib(10),
             memory_cache_size,
-            metrics_listen: metrics_addr,
+            metrics_listen: metrics_addr.clone(),
             memory_limit,
         };
 
@@ -67,17 +68,26 @@ impl TestServer {
             args.memory_cache_size.as_u64(),
             args.memory_limit.map(|b| b.as_u64()),
         ));
+        let memory_semaphore_clone = Arc::clone(&memory_semaphore);
 
         let handle = thread::spawn(move || {
             let rt = compio::runtime::RuntimeBuilder::new().build().unwrap();
             rt.block_on(async {
                 compio::runtime::spawn(cachey::cache::run_cleanup_loop(cleanup_rx)).detach();
+                compio::runtime::spawn(cachey::metrics::serve_metrics(
+                    0,
+                    args.metrics_listen.clone(),
+                    Arc::clone(&disk_cache_clone),
+                    Arc::clone(&memory_cache_clone),
+                    Arc::clone(&memory_semaphore_clone),
+                ))
+                .detach();
                 let _ = cachey::server::serve_shard(
                     0,
                     args,
                     disk_cache_clone,
                     memory_cache_clone,
-                    memory_semaphore,
+                    memory_semaphore_clone,
                     shutdown_rx,
                 )
                 .await;
@@ -86,6 +96,7 @@ impl TestServer {
 
         Self {
             addr,
+            metrics_addr,
             disk_cache,
             memory_cache,
             shutdown_tx,
@@ -96,6 +107,10 @@ impl TestServer {
 
     fn addr(&self) -> &str {
         &self.addr
+    }
+
+    fn metrics_addr(&self) -> &str {
+        &self.metrics_addr
     }
 }
 
@@ -465,5 +480,30 @@ fn sequential_requests_complete_under_memory_pressure() {
                 body.read_to_end(&mut received).await.unwrap();
                 assert_eq!(received.len(), 256 * 1024);
             }
+        });
+}
+
+#[test]
+fn health_endpoint_returns_ok() {
+    let server = TestServer::start();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut stream = connect_tokio(server.metrics_addr()).await;
+            tokio::io::AsyncWriteExt::write_all(&mut stream, b"GET /health HTTP/1.1\r\n\r\n")
+                .await
+                .unwrap();
+
+            let mut response = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut response)
+                .await
+                .unwrap();
+
+            let response = String::from_utf8_lossy(&response);
+            assert!(response.starts_with("HTTP/1.1 200 OK"));
+            assert!(response.contains("OK"));
         });
 }

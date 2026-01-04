@@ -245,29 +245,42 @@ async fn handle_metrics_request(
     }
 
     let request = String::from_utf8_lossy(&buf[..n]);
-    let is_metrics_request = request.starts_with("GET /metrics") || request.starts_with("GET / ");
 
-    let response = if is_metrics_request {
+    let response = if request.starts_with("GET /health") {
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Length: 2\r\n\
+         Connection: close\r\n\
+         \r\n\
+         OK"
+    } else if request.starts_with("GET /metrics") || request.starts_with("GET / ") {
         let body = render(&disk_cache, &memory_cache, &memory_semaphore);
-        format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             \r\n\
-             {}",
-            body.len(),
-            body
+        return write_response(
+            stream,
+            format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {}",
+                body.len(),
+                body
+            ),
         )
+        .await;
     } else {
         "HTTP/1.1 404 Not Found\r\n\
          Content-Length: 0\r\n\
          Connection: close\r\n\
          \r\n"
-            .to_string()
     };
 
-    let _ = stream.write_all(response.into_bytes().slice(..)).await;
+    write_response(stream, response).await;
+}
+
+async fn write_response(mut stream: TcpStream, response: impl Into<Vec<u8>>) {
+    let _ = stream.write_all(response.into().slice(..)).await;
 }
 
 pub async fn serve_metrics(
