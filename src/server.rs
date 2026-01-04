@@ -63,7 +63,7 @@ impl Interceptor for MetricsInterceptor {
 
 struct TcpStreamCompat(TcpStream);
 
-#[rsmp::local_stream_compat]
+#[rsmp::stream_compat_local]
 impl AsyncStreamCompat for TcpStreamCompat {
     async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         let mut filled = 0;
@@ -181,7 +181,7 @@ impl CacheHandler {
     }
 }
 
-#[rsmp::local_handler]
+#[rsmp::handler_local]
 impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
     async fn get(
         &self,

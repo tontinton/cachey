@@ -542,7 +542,7 @@ pub fn handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn local_handler(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn handler_local(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item: TokenStream2 = item.into();
     quote! {
         #[rsmp::async_trait(?Send)]
@@ -562,7 +562,7 @@ pub fn stream_compat(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn local_stream_compat(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn stream_compat_local(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item: TokenStream2 = item.into();
     quote! {
         #[rsmp::async_trait(?Send)]
