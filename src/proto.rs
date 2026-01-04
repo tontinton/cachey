@@ -1,6 +1,5 @@
 use std::ops::Range;
 
-use rsmp::Array;
 use rsmp::prelude::*;
 
 pub type MemoryCacheRanges = Array<Range<u64>>;

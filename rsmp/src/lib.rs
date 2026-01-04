@@ -717,7 +717,7 @@ impl<T: Args> Decode<'_> for Array<T> {
 }
 
 pub mod prelude {
-    pub use crate::{Args, Stream};
+    pub use crate::{Args, Array, Stream};
 }
 
 #[cfg(test)]
