@@ -185,13 +185,13 @@ impl CacheHandler {
 impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
     async fn get(
         &self,
-        id: String,
+        id: &str,
         offset: u64,
         size: u64,
         stream: &mut TcpStreamCompat,
     ) -> Result<(), CacheError> {
         let end = offset + size;
-        if let Some(data) = self.memory_cache.get(&id, offset, end) {
+        if let Some(data) = self.memory_cache.get(id, offset, end) {
             debug!(
                 shard_id = self.shard_id,
                 id, offset, size, "memory cache hit"
@@ -205,11 +205,11 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
             return Ok(());
         }
 
-        let path = match self.disk_cache.get(&id) {
+        let path = match self.disk_cache.get(id) {
             Some(p) => p,
             None => {
                 debug!(shard_id = self.shard_id, id, "not found");
-                return Err(CacheError::NotFound(NotFoundError { id }));
+                return Err(CacheError::NotFound(NotFoundError { id: id.to_string() }));
             }
         };
 
@@ -233,7 +233,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
 
     async fn put(
         &self,
-        id: String,
+        id: &str,
         memory_cache_ranges: Option<MemoryCacheRanges>,
         stream: &mut TcpStreamCompat,
         size: u64,
@@ -246,7 +246,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         let permit_size = STREAM_FILE_BUF_SIZE as u64 + total_capture_size;
         let _permit = self.memory_semaphore.acquire(permit_size).await;
 
-        let path = self.disk_cache.generate_path(&id);
+        let path = self.disk_cache.generate_path(id);
 
         debug!(shard_id = self.shard_id, id, ?path, "writing");
 
@@ -264,11 +264,11 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
                     "caching chunk in memory"
                 );
                 self.memory_cache
-                    .insert(id.clone(), range.start, range.end, data);
+                    .insert(id.to_string(), range.start, range.end, data);
             }
         }
 
-        self.disk_cache.insert(id, size);
+        self.disk_cache.insert(id.to_string(), size);
 
         debug!(shard_id = self.shard_id, ?path, "written");
 

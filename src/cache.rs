@@ -228,7 +228,7 @@ impl DiskCache {
         self.dir.join(key)
     }
 
-    pub fn get(&self, key: &CacheKey) -> Option<PathBuf> {
+    pub fn get(&self, key: &str) -> Option<PathBuf> {
         self.inner.get(key)?;
         Some(self.generate_path(key))
     }
@@ -337,13 +337,13 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let (disk_cache, _rx) = DiskCache::new(dir.path().to_path_buf(), 1000);
 
-            disk_cache.get(&"x".into());
-            disk_cache.get(&"y".into());
+            disk_cache.get("x");
+            disk_cache.get("y");
             assert_eq!(disk_cache.misses(), 2);
 
             disk_cache.insert("x".into(), 10);
-            disk_cache.get(&"x".into());
-            disk_cache.get(&"x".into());
+            disk_cache.get("x");
+            disk_cache.get("x");
             assert_eq!(disk_cache.hits(), 2);
         }
     }

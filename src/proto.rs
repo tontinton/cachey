@@ -35,6 +35,6 @@ impl From<std::io::Error> for CacheError {
 
 #[rsmp::service(error = CacheError)]
 pub trait CacheService {
-    async fn get(&self, id: String, offset: u64, size: u64) -> Stream;
-    async fn put(&self, id: String, memory_cache_ranges: Option<MemoryCacheRanges>, body: Stream);
+    async fn get(&self, id: &str, offset: u64, size: u64) -> Stream;
+    async fn put(&self, id: &str, memory_cache_ranges: Option<MemoryCacheRanges>, body: Stream);
 }
