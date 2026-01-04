@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use quick_cache::{Lifecycle, Weighter, sync::Cache as QuickCache};
 use tracing::warn;
@@ -40,17 +41,76 @@ impl Weighter<ChunkKey, Arc<[u8]>> for ChunkWeighter {
     }
 }
 
-type InnerMemoryCache = QuickCache<ChunkKey, Arc<[u8]>, ChunkWeighter>;
+struct EvictionStats {
+    evictions: AtomicU64,
+    evicted_bytes: AtomicU64,
+}
+
+impl EvictionStats {
+    fn new() -> Self {
+        Self {
+            evictions: AtomicU64::new(0),
+            evicted_bytes: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, bytes: u64) {
+        self.evictions.fetch_add(1, Ordering::Relaxed);
+        self.evicted_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn evictions(&self) -> u64 {
+        self.evictions.load(Ordering::Relaxed)
+    }
+
+    fn evicted_bytes(&self) -> u64 {
+        self.evicted_bytes.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Clone)]
+struct MemoryEvictionLifecycle {
+    stats: Arc<EvictionStats>,
+}
+
+impl Lifecycle<ChunkKey, Arc<[u8]>> for MemoryEvictionLifecycle {
+    type RequestState = ();
+
+    fn begin_request(&self) -> Self::RequestState {}
+
+    fn on_evict(&self, _state: &mut Self::RequestState, _key: ChunkKey, val: Arc<[u8]>) {
+        self.stats.record(val.len() as u64);
+    }
+}
+
+type InnerMemoryCache = QuickCache<
+    ChunkKey,
+    Arc<[u8]>,
+    ChunkWeighter,
+    quick_cache::DefaultHashBuilder,
+    MemoryEvictionLifecycle,
+>;
 
 pub struct MemoryCache {
     inner: InnerMemoryCache,
+    stats: Arc<EvictionStats>,
 }
 
 impl MemoryCache {
     pub fn new(capacity_bytes: u64) -> Self {
         let estimated_items = (capacity_bytes / 65536).max(16) as usize;
-        let inner = QuickCache::with_weighter(estimated_items, capacity_bytes, ChunkWeighter);
-        Self { inner }
+        let stats = Arc::new(EvictionStats::new());
+        let lifecycle = MemoryEvictionLifecycle {
+            stats: Arc::clone(&stats),
+        };
+        let inner = QuickCache::with(
+            estimated_items,
+            capacity_bytes,
+            ChunkWeighter,
+            quick_cache::DefaultHashBuilder::default(),
+            lifecycle,
+        );
+        Self { inner, stats }
     }
 
     pub fn insert(&self, id: String, start: u64, end: u64, data: Vec<u8>) {
@@ -86,20 +146,30 @@ impl MemoryCache {
     pub fn misses(&self) -> u64 {
         self.inner.misses()
     }
+
+    pub fn evictions(&self) -> u64 {
+        self.stats.evictions()
+    }
+
+    pub fn evicted_bytes(&self) -> u64 {
+        self.stats.evicted_bytes()
+    }
 }
 
 #[derive(Clone)]
-struct EvictionLifecycle {
+struct DiskEvictionLifecycle {
     dir: PathBuf,
     cleanup_tx: flume::Sender<PathBuf>,
+    stats: Arc<EvictionStats>,
 }
 
-impl Lifecycle<CacheKey, u64> for EvictionLifecycle {
+impl Lifecycle<CacheKey, u64> for DiskEvictionLifecycle {
     type RequestState = ();
 
     fn begin_request(&self) -> Self::RequestState {}
 
-    fn on_evict(&self, _state: &mut Self::RequestState, key: CacheKey, _size: u64) {
+    fn on_evict(&self, _state: &mut Self::RequestState, key: CacheKey, size: u64) {
+        self.stats.record(size);
         let path = self.dir.join(&key);
         if self.cleanup_tx.try_send(path.clone()).is_err() {
             warn!(
@@ -118,19 +188,23 @@ pub async fn run_cleanup_loop(cleanup_rx: CleanupReceiver) {
 }
 
 type InnerDiskCache =
-    QuickCache<CacheKey, u64, SizeWeighter, quick_cache::DefaultHashBuilder, EvictionLifecycle>;
+    QuickCache<CacheKey, u64, SizeWeighter, quick_cache::DefaultHashBuilder, DiskEvictionLifecycle>;
 
 pub struct DiskCache {
     dir: PathBuf,
     inner: InnerDiskCache,
+    stats: Arc<EvictionStats>,
+    cleanup_tx: flume::Sender<PathBuf>,
 }
 
 impl DiskCache {
     pub fn new(dir: PathBuf, capacity_bytes: u64) -> (Self, CleanupReceiver) {
         let (cleanup_tx, cleanup_rx) = flume::bounded(MAX_CLEANUP_TASKS_IN_QUEUE);
-        let lifecycle = EvictionLifecycle {
+        let stats = Arc::new(EvictionStats::new());
+        let lifecycle = DiskEvictionLifecycle {
             dir: dir.clone(),
-            cleanup_tx,
+            cleanup_tx: cleanup_tx.clone(),
+            stats: Arc::clone(&stats),
         };
         let inner = QuickCache::with(
             1000,
@@ -139,7 +213,15 @@ impl DiskCache {
             quick_cache::DefaultHashBuilder::default(),
             lifecycle,
         );
-        (Self { dir, inner }, cleanup_rx)
+        (
+            Self {
+                dir,
+                inner,
+                stats,
+                cleanup_tx,
+            },
+            cleanup_rx,
+        )
     }
 
     pub fn generate_path(&self, key: &str) -> PathBuf {
@@ -178,6 +260,18 @@ impl DiskCache {
     pub fn misses(&self) -> u64 {
         self.inner.misses()
     }
+
+    pub fn evictions(&self) -> u64 {
+        self.stats.evictions()
+    }
+
+    pub fn evicted_bytes(&self) -> u64 {
+        self.stats.evicted_bytes()
+    }
+
+    pub fn cleanup_pending(&self) -> usize {
+        self.cleanup_tx.len()
+    }
 }
 
 #[cfg(test)]
@@ -197,6 +291,45 @@ mod tests {
 
             let evicted = rx.try_recv().unwrap();
             assert!(evicted.ends_with("a"));
+        }
+
+        #[test]
+        fn tracks_evictions_count_and_bytes() {
+            let dir = tempfile::tempdir().unwrap();
+            let (disk_cache, _rx) = DiskCache::new(dir.path().to_path_buf(), 100);
+
+            assert_eq!(disk_cache.evictions(), 0);
+            assert_eq!(disk_cache.evicted_bytes(), 0);
+
+            disk_cache.insert("a".into(), 60);
+            disk_cache.insert("b".into(), 60);
+
+            let evictions_after_b = disk_cache.evictions();
+            let evicted_bytes_after_b = disk_cache.evicted_bytes();
+            assert!(evictions_after_b >= 1);
+            assert!(evicted_bytes_after_b >= 60);
+
+            disk_cache.insert("c".into(), 60);
+
+            assert!(disk_cache.evictions() > evictions_after_b);
+            assert!(disk_cache.evicted_bytes() > evicted_bytes_after_b);
+        }
+
+        #[test]
+        fn cleanup_pending_reflects_queue_length() {
+            let dir = tempfile::tempdir().unwrap();
+            let (disk_cache, rx) = DiskCache::new(dir.path().to_path_buf(), 100);
+
+            assert_eq!(disk_cache.cleanup_pending(), 0);
+
+            disk_cache.insert("a".into(), 60);
+            disk_cache.insert("b".into(), 60);
+
+            let pending = disk_cache.cleanup_pending();
+            assert!(pending >= 1);
+
+            let _ = rx.try_recv();
+            assert!(disk_cache.cleanup_pending() < pending);
         }
 
         #[test]
@@ -271,6 +404,25 @@ mod tests {
 
             let c_data = cache.get("c", 0, chunk_size as u64).unwrap();
             assert!(c_data.iter().all(|&x| x == 3));
+        }
+
+        #[test]
+        fn tracks_evictions_count_and_bytes() {
+            let chunk_size = 100_000usize;
+            let cache = MemoryCache::new((chunk_size * 2) as u64);
+
+            assert_eq!(cache.evictions(), 0);
+            assert_eq!(cache.evicted_bytes(), 0);
+
+            cache.insert("a".into(), 0, chunk_size as u64, vec![1u8; chunk_size]);
+            cache.insert("b".into(), 0, chunk_size as u64, vec![2u8; chunk_size]);
+
+            assert_eq!(cache.evictions(), 0);
+
+            cache.insert("c".into(), 0, chunk_size as u64, vec![3u8; chunk_size]);
+
+            assert!(cache.evictions() >= 1);
+            assert!(cache.evicted_bytes() >= chunk_size as u64);
         }
 
         #[test]

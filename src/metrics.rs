@@ -37,6 +37,11 @@ pub struct Metrics {
     pub cache_capacity_bytes: IntGaugeVec,
     pub cache_hits_total: IntGaugeVec,
     pub cache_misses_total: IntGaugeVec,
+    pub cache_evictions_total: IntGaugeVec,
+    pub cache_evicted_bytes_total: IntGaugeVec,
+
+    // Disk cleanup metrics
+    pub disk_cleanup_pending: IntGauge,
 
     // Memory semaphore metrics
     pub memory_semaphore_capacity_bytes: IntGauge,
@@ -115,6 +120,26 @@ impl Default for Metrics {
             )
             .expect("create cache_misses_total"),
 
+            cache_evictions_total: register_int_gauge_vec!(
+                "cachey_cache_evictions_total",
+                "Total number of cache evictions",
+                &["type"]
+            )
+            .expect("create cache_evictions_total"),
+
+            cache_evicted_bytes_total: register_int_gauge_vec!(
+                "cachey_cache_evicted_bytes_total",
+                "Total bytes evicted from cache",
+                &["type"]
+            )
+            .expect("create cache_evicted_bytes_total"),
+
+            disk_cleanup_pending: register_int_gauge!(
+                "cachey_disk_cleanup_pending",
+                "Number of files pending cleanup in the disk cleanup queue"
+            )
+            .expect("create disk_cleanup_pending"),
+
             memory_semaphore_capacity_bytes: register_int_gauge!(
                 "cachey_memory_semaphore_capacity_bytes",
                 "Total capacity of the memory semaphore in bytes"
@@ -152,6 +177,14 @@ impl Metrics {
         self.cache_misses_total
             .with_label_values(&[LABEL_DISK])
             .set(disk_cache.misses() as i64);
+        self.cache_evictions_total
+            .with_label_values(&[LABEL_DISK])
+            .set(disk_cache.evictions() as i64);
+        self.cache_evicted_bytes_total
+            .with_label_values(&[LABEL_DISK])
+            .set(disk_cache.evicted_bytes() as i64);
+        self.disk_cleanup_pending
+            .set(disk_cache.cleanup_pending() as i64);
 
         self.cache_items
             .with_label_values(&[LABEL_MEMORY])
@@ -168,6 +201,12 @@ impl Metrics {
         self.cache_misses_total
             .with_label_values(&[LABEL_MEMORY])
             .set(memory_cache.misses() as i64);
+        self.cache_evictions_total
+            .with_label_values(&[LABEL_MEMORY])
+            .set(memory_cache.evictions() as i64);
+        self.cache_evicted_bytes_total
+            .with_label_values(&[LABEL_MEMORY])
+            .set(memory_cache.evicted_bytes() as i64);
 
         self.memory_semaphore_capacity_bytes
             .set(memory_semaphore.capacity_bytes() as i64);
