@@ -170,7 +170,7 @@ impl Lifecycle<CacheKey, u64> for DiskEvictionLifecycle {
 
     fn on_evict(&self, _state: &mut Self::RequestState, key: CacheKey, size: u64) {
         self.stats.record(size);
-        let path = self.dir.join(&key);
+        let path = self.dir.join(sanitize_key(&key));
         if self.cleanup_tx.try_send(path.clone()).is_err() {
             warn!(
                 ?path,
@@ -225,7 +225,7 @@ impl DiskCache {
     }
 
     pub fn generate_path(&self, key: &str) -> PathBuf {
-        self.dir.join(key)
+        self.dir.join(sanitize_key(key))
     }
 
     pub fn get(&self, key: &str) -> Option<PathBuf> {
@@ -274,6 +274,18 @@ impl DiskCache {
     }
 }
 
+fn sanitize_key(key: &str) -> String {
+    key.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,7 +302,7 @@ mod tests {
             disk_cache.insert("b".into(), 60);
 
             let evicted = rx.try_recv().unwrap();
-            assert!(evicted.ends_with("a"));
+            assert_eq!(evicted, disk_cache.generate_path("a"));
         }
 
         #[test]
