@@ -24,7 +24,7 @@ use crate::proto::{
 };
 use crate::{BufResultExt, MemorySemaphore, create_listener};
 
-const STREAM_FILE_BUF_SIZE: usize = 64 * 1024;
+const STREAM_FILE_BUF_SIZE: usize = 256 * 1024;
 
 fn capture_ranges_from_chunk(
     chunk: &[u8],
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn stream_file_returns_exact_requested_range() {
-        let file_data: Vec<u8> = (0..200_000).map(|i| (i % 256) as u8).collect();
+        let file_data: Vec<u8> = (0..300_000).map(|i| (i % 256) as u8).collect();
 
         let data = simulate_stream_file(&file_data, 0, 100);
         assert_eq!(data, &file_data[0..100]);
