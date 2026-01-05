@@ -85,7 +85,7 @@ impl AsyncStreamCompat for TcpStreamCompat {
             unsafe {
                 tmp.set_len(remaining);
             }
-            let (n, returned) = self.0.read(tmp.slice(..)).await.result()?;
+            let (n, returned) = self.0.read(tmp.slice(..remaining)).await.result()?;
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -520,5 +520,31 @@ mod tests {
         capture_ranges_from_chunk(&chunk, 0, &mut captures);
 
         assert!(captures[0].1.is_empty());
+    }
+
+    #[test]
+    fn read_exact_with_reused_buffer_respects_remaining() {
+        let source: Vec<u8> = (0..200).collect();
+        let mut buf = vec![0u8; 100];
+        let mut filled = 0;
+        let mut tmp = Vec::with_capacity(buf.len());
+        let mut source_offset = 0;
+
+        while filled < buf.len() {
+            let remaining = buf.len() - filled;
+            tmp.reserve(remaining);
+            tmp.resize(remaining.max(tmp.len()), 0);
+
+            let read_limit = remaining;
+            let n = read_limit.min(source.len() - source_offset);
+            tmp[..n].copy_from_slice(&source[source_offset..source_offset + n]);
+            source_offset += n;
+
+            assert!(filled + n <= buf.len());
+            buf[filled..filled + n].copy_from_slice(&tmp[..n]);
+            filled += n;
+        }
+
+        assert_eq!(buf, &source[..100]);
     }
 }
