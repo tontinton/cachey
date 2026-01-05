@@ -192,6 +192,55 @@ impl CacheHandler {
 
         Ok(captures)
     }
+
+    async fn put_inner(
+        &self,
+        id: &str,
+        memory_cache_ranges: Option<MemoryCacheRanges>,
+        stream: &mut TcpStreamCompat,
+        size: u64,
+    ) -> Result<(), CacheError> {
+        let ranges = memory_cache_ranges
+            .map(|r| r.into_inner())
+            .unwrap_or_default();
+
+        let total_capture_size: u64 = ranges.iter().map(|r| (r.end - r.start).min(size)).sum();
+        let permit_size = STREAM_FILE_BUF_SIZE as u64 + total_capture_size;
+        let _permit = self.memory_semaphore.acquire(permit_size).await;
+
+        let path = self.disk_cache.generate_path(id);
+
+        debug!(shard_id = self.shard_id, id, ?path, "writing");
+
+        let mut file = File::create(&path).await?;
+
+        let captures = Self::stream_to_file(stream, &mut file, size, ranges).await?;
+
+        for (range, data) in captures {
+            if data.len() as u64 == range.end - range.start {
+                debug!(
+                    shard_id = self.shard_id,
+                    id,
+                    start = range.start,
+                    end = range.end,
+                    "caching chunk in memory"
+                );
+                self.memory_cache
+                    .insert(id.to_string(), range.start, range.end, data);
+            }
+        }
+
+        self.disk_cache.insert(id.to_string(), size);
+
+        debug!(shard_id = self.shard_id, ?path, "written");
+
+        METRICS
+            .bytes_written_total
+            .with_label_values(&[Self::PUT_NAME])
+            .inc_by(size);
+
+        Ok(())
+    }
 }
 
 #[rsmp::handler_local]
@@ -251,51 +300,17 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         stream: &mut TcpStreamCompat,
         size: u64,
     ) -> Result<(), CacheError> {
-        if self.disk_cache.contains(id) {
-            debug!(shard_id = self.shard_id, id, "already cached");
+        if self.disk_cache.contains(id) || !self.disk_cache.start_writing(id) {
+            debug!(
+                shard_id = self.shard_id,
+                id, "already cached or being written"
+            );
             return Err(CacheError::AlreadyExists(id.to_string()));
         }
 
-        let ranges = memory_cache_ranges
-            .map(|r| r.into_inner())
-            .unwrap_or_default();
-
-        let total_capture_size: u64 = ranges.iter().map(|r| (r.end - r.start).min(size)).sum();
-        let permit_size = STREAM_FILE_BUF_SIZE as u64 + total_capture_size;
-        let _permit = self.memory_semaphore.acquire(permit_size).await;
-
-        let path = self.disk_cache.generate_path(id);
-
-        debug!(shard_id = self.shard_id, id, ?path, "writing");
-
-        let mut file = File::create(&path).await?;
-
-        let captures = Self::stream_to_file(stream, &mut file, size, ranges).await?;
-
-        for (range, data) in captures {
-            if data.len() as u64 == range.end - range.start {
-                debug!(
-                    shard_id = self.shard_id,
-                    id,
-                    start = range.start,
-                    end = range.end,
-                    "caching chunk in memory"
-                );
-                self.memory_cache
-                    .insert(id.to_string(), range.start, range.end, data);
-            }
-        }
-
-        self.disk_cache.insert(id.to_string(), size);
-
-        debug!(shard_id = self.shard_id, ?path, "written");
-
-        METRICS
-            .bytes_written_total
-            .with_label_values(&[Self::PUT_NAME])
-            .inc_by(size);
-
-        Ok(())
+        let result = self.put_inner(id, memory_cache_ranges, stream, size).await;
+        self.disk_cache.finish_writing(id);
+        result
     }
 }
 

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use dashmap::DashSet;
 use quick_cache::{Lifecycle, Weighter, sync::Cache as QuickCache};
 use tracing::warn;
 
@@ -195,6 +196,7 @@ pub struct DiskCache {
     inner: InnerDiskCache,
     stats: Arc<EvictionStats>,
     cleanup_tx: flume::Sender<PathBuf>,
+    writing: DashSet<String>,
 }
 
 impl DiskCache {
@@ -219,6 +221,7 @@ impl DiskCache {
                 inner,
                 stats,
                 cleanup_tx,
+                writing: DashSet::new(),
             },
             cleanup_rx,
         )
@@ -275,6 +278,14 @@ impl DiskCache {
 
     pub fn cleanup_pending(&self) -> usize {
         self.cleanup_tx.len()
+    }
+
+    pub fn start_writing(&self, key: &str) -> bool {
+        self.writing.insert(key.to_string())
+    }
+
+    pub fn finish_writing(&self, key: &str) {
+        self.writing.remove(key);
     }
 }
 
