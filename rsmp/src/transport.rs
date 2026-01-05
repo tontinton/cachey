@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use futures_io::{AsyncRead, AsyncWrite};
 
 use crate::{
-    BoxAsyncRead, BoxAsyncReadLocal, ERROR_MARKER, StreamResult, Transport, TransportError,
+    BoxAsyncRead, BoxAsyncReadLocal, StreamResult, Transport, TransportError, ERROR_MARKER,
 };
 
 pub enum Response {

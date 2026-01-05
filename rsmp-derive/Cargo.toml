@@ -1,7 +1,8 @@
 [package]
 name = "rsmp-derive"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+rust-version = "1.75"
 
 [lib]
 proc-macro = true

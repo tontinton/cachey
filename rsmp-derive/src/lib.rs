@@ -4,8 +4,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    Data, DeriveInput, Fields, FnArg, ItemTrait, LitInt, Pat, ReturnType, TraitItem, Type,
-    parse_macro_input,
+    parse_macro_input, Data, DeriveInput, Fields, FnArg, ItemTrait, LitInt, Pat, ReturnType,
+    TraitItem, Type,
 };
 
 type FieldIndex = u16;
@@ -280,21 +280,23 @@ fn impl_args_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
 }
 
 fn is_option_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.last()
-    {
-        return segment.ident == "Option";
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "Option";
+        }
     }
     false
 }
 
 fn extract_option_inner(ty: &Type) -> TokenStream2 {
-    if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.last()
-        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return quote! { #inner };
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                    return quote! { #inner };
+                }
+            }
+        }
     }
     quote! { () }
 }
@@ -442,10 +444,10 @@ struct MethodInfo {
 }
 
 fn is_stream_marker_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.last()
-    {
-        return segment.ident == "Stream";
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "Stream";
+        }
     }
     false
 }

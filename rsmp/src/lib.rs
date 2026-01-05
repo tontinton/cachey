@@ -1,5 +1,6 @@
 extern crate self as rsmp;
 
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 
@@ -9,7 +10,7 @@ use thiserror::Error;
 pub use async_trait::async_trait;
 pub use futures_io::{AsyncRead, AsyncWrite};
 pub use futures_util;
-pub use rsmp_derive::{Args, handler, handler_local, service, stream_compat, stream_compat_local};
+pub use rsmp_derive::{handler, handler_local, service, stream_compat, stream_compat_local, Args};
 
 pub mod transport;
 
