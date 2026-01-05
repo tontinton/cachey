@@ -19,7 +19,8 @@ use tracing::{debug, error, info};
 use crate::cache::{DiskCache, MemoryCache};
 use crate::metrics::{LABEL_ERROR, LABEL_SUCCESS, METRICS};
 use crate::proto::{
-    CacheError, CacheServiceDispatcher, CacheServiceHandlerLocal, MemoryCacheRanges, NotFoundError,
+    CacheError, CacheServiceDispatcher, CacheServiceHandlerLocal, IoError, MemoryCacheRanges,
+    NotFoundError,
 };
 use crate::{BufResultExt, MemorySemaphore, create_listener};
 
@@ -39,6 +40,14 @@ fn capture_ranges_from_chunk(
             let buf_end = (copy_end - chunk_start) as usize;
             capture_buf.extend_from_slice(&chunk[buf_start..buf_end]);
         }
+    }
+}
+
+impl From<std::io::Error> for CacheError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(IoError {
+            message: e.to_string(),
+        })
     }
 }
 

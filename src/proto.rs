@@ -26,14 +26,6 @@ pub enum CacheError {
     AlreadyExists(String),
 }
 
-impl From<std::io::Error> for CacheError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(IoError {
-            message: e.to_string(),
-        })
-    }
-}
-
 #[rsmp::service(error = CacheError)]
 pub trait CacheService {
     async fn get(&self, id: &str, offset: u64, size: u64) -> Stream;
