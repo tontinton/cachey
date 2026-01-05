@@ -124,7 +124,7 @@ impl Drop for TestServer {
     }
 }
 
-async fn run_client_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>) {
+async fn run_put_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>) {
     client
         .put(
             "test-file",
@@ -133,7 +133,9 @@ async fn run_client_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>)
         )
         .await
         .unwrap();
+}
 
+async fn run_get_test<T: rsmp::Transport>(client: &mut CacheServiceClient<T>) {
     let mut response = client
         .get("test-file", 0, TEST_DATA.len() as u64)
         .await
@@ -174,7 +176,14 @@ fn put_and_get_tokio() {
             let stream = connect_tokio(server.addr()).await;
             let mut client = CacheServiceClient::from_stream(stream.compat());
             run_not_found_test(&mut client).await;
-            run_client_test(&mut client).await;
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+            run_put_test(&mut client).await;
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+            run_get_test(&mut client).await;
             run_not_found_test(&mut client).await;
         });
 }
@@ -189,7 +198,16 @@ fn put_and_get_compio() {
         let compat_stream = compio::io::compat::AsyncStream::new(stream);
         let mut client = CacheServiceClient::from_stream_local(compat_stream);
         run_not_found_test(&mut client).await;
-        run_client_test(&mut client).await;
+
+        let stream = connect_compio(server.addr()).await;
+        let compat_stream = compio::io::compat::AsyncStream::new(stream);
+        let mut client = CacheServiceClient::from_stream_local(compat_stream);
+        run_put_test(&mut client).await;
+
+        let stream = connect_compio(server.addr()).await;
+        let compat_stream = compio::io::compat::AsyncStream::new(stream);
+        let mut client = CacheServiceClient::from_stream_local(compat_stream);
+        run_get_test(&mut client).await;
         run_not_found_test(&mut client).await;
     });
 }
@@ -219,10 +237,11 @@ fn put_and_get_verifies_disk_cache_metrics() {
             let stream = connect_tokio(server.addr()).await;
             let mut client = CacheServiceClient::from_stream(stream.compat());
 
-            {
-                let result = client.get("missing", 0, 100).await;
-                assert!(result.is_err());
-            }
+            let result = client.get("missing", 0, 100).await;
+            assert!(result.is_err());
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             client
                 .put(
@@ -232,6 +251,9 @@ fn put_and_get_verifies_disk_cache_metrics() {
                 )
                 .await
                 .unwrap();
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             let mut body = client
                 .get("file1", 0, TEST_DATA.len() as u64)
@@ -285,6 +307,65 @@ fn put_with_cache_ranges_populates_memory_cache() {
 }
 
 #[test]
+fn put_existing_file_skips_write() {
+    let server = TestServer::start();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+
+            client
+                .put(
+                    "file1",
+                    None,
+                    Stream::new(TEST_DATA, TEST_DATA.len() as u64),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(server.disk_cache.len(), 1);
+            assert_eq!(server.disk_cache.weight(), TEST_DATA.len() as u64);
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+
+            let different_data: &[u8] = b"different content!";
+            let result = client
+                .put(
+                    "file1",
+                    None,
+                    Stream::new(different_data, different_data.len() as u64),
+                )
+                .await;
+
+            match result {
+                Err(rsmp::ClientError::Server(cachey::proto::CacheError::AlreadyExists(id))) => {
+                    assert_eq!(id, "file1");
+                }
+                other => panic!("expected AlreadyExists error, got {:?}", other.map(|_| ())),
+            }
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+
+            assert_eq!(server.disk_cache.len(), 1);
+            assert_eq!(server.disk_cache.weight(), TEST_DATA.len() as u64);
+
+            let mut body = client
+                .get("file1", 0, TEST_DATA.len() as u64)
+                .await
+                .unwrap();
+            let mut data = vec![0u8; TEST_DATA.len()];
+            body.read_exact(&mut data).await.unwrap();
+            assert_eq!(data, TEST_DATA);
+        });
+}
+
+#[test]
 fn get_hits_memory_cache_before_disk() {
     let data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
     let server = TestServer::start_with_memory_cache_size(ByteSize::mib(10));
@@ -310,6 +391,9 @@ fn get_hits_memory_cache_before_disk() {
 
             assert_eq!(server.memory_cache.hits(), 0);
             assert_eq!(server.disk_cache.hits(), 0);
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             let mut body = client.get("file1", 0, 100).await.unwrap();
             let mut received = vec![0u8; 100];
@@ -347,6 +431,9 @@ fn get_falls_back_to_disk_on_memory_miss() {
                 .await
                 .unwrap();
 
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+
             let mut body = client.get("file1", 200, 100).await.unwrap();
             let mut received = vec![0u8; 100];
             body.read_exact(&mut received).await.unwrap();
@@ -376,6 +463,9 @@ fn get_partial_file_from_disk() {
                 .put("bigfile", None, Stream::from_vec(data.clone()))
                 .await
                 .unwrap();
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             {
                 let mut body = client.get("bigfile", 0, 256).await.unwrap();
@@ -411,6 +501,9 @@ fn get_range_past_eof_returns_partial_data() {
                 .await
                 .unwrap();
 
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+
             let mut body = client.get("small", 50, 200).await.unwrap();
 
             let mut received = Vec::new();
@@ -442,6 +535,9 @@ fn sequential_requests_complete_under_memory_pressure() {
                 .put("pressure-test", None, Stream::from_vec(data.clone()))
                 .await
                 .unwrap();
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
 
             for _ in 0..3 {
                 let mut body = client.get("pressure-test", 0, 256 * 1024).await.unwrap();

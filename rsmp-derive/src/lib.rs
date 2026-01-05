@@ -816,67 +816,75 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 (true, true, true) => quote! {
                     #idx => {
                         #(#decode_args)*
-                        match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                        let ok = match __handler.#name(#(#call_args,)* __stream, __req_size).await {
                             Ok(_result) => true,
                             Err(e) => {
-                                __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
+                                let _ = __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await;
                                 let err_data = rsmp::Args::encode_args(&e);
-                                __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await?;
-                                __stream.write_all(&err_data).await?;
+                                let _ = __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await;
+                                let _ = __stream.write_all(&err_data).await;
                                 false
                             }
-                        }
+                        };
+                        let _ = __stream.close().await;
+                        ok
                     }
                 },
                 (true, true, false) => quote! {
                     #idx => {
                         #(#decode_args)*
-                        match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                        let ok = match __handler.#name(#(#call_args,)* __stream, __req_size).await {
                             Ok(()) => true,
                             Err(e) => {
-                                __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await?;
+                                let _ = __stream.write_all(&rsmp::ERROR_MARKER.to_be_bytes()).await;
                                 let err_data = rsmp::Args::encode_args(&e);
-                                __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await?;
-                                __stream.write_all(&err_data).await?;
+                                let _ = __stream.write_all(&(err_data.len() as u32).to_be_bytes()).await;
+                                let _ = __stream.write_all(&err_data).await;
                                 false
                             }
-                        }
+                        };
+                        let _ = __stream.close().await;
+                        ok
                     }
                 },
                 (true, false, true) => quote! {
                     #idx => {
                         #(#decode_args)*
-                        match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                        let ok = match __handler.#name(#(#call_args,)* __stream, __req_size).await {
                             Ok(result) => {
                                 let response = rsmp::Args::encode_args(&result);
-                                __stream.write_all(&(response.len() as u32).to_be_bytes()).await?;
-                                __stream.write_all(&response).await?;
+                                let _ = __stream.write_all(&(response.len() as u32).to_be_bytes()).await;
+                                let _ = __stream.write_all(&response).await;
                                 true
                             }
                             Err(e) => {
                                 let err_data = rsmp::Args::encode_args(&e);
-                                __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await?;
-                                __stream.write_all(&err_data).await?;
+                                let _ = __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await;
+                                let _ = __stream.write_all(&err_data).await;
                                 false
                             }
-                        }
+                        };
+                        let _ = __stream.close().await;
+                        ok
                     }
                 },
                 (true, false, false) => quote! {
                     #idx => {
                         #(#decode_args)*
-                        match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                        let ok = match __handler.#name(#(#call_args,)* __stream, __req_size).await {
                             Ok(()) => {
-                                __stream.write_all(&0u32.to_be_bytes()).await?;
+                                let _ = __stream.write_all(&0u32.to_be_bytes()).await;
                                 true
                             }
                             Err(e) => {
                                 let err_data = rsmp::Args::encode_args(&e);
-                                __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await?;
-                                __stream.write_all(&err_data).await?;
+                                let _ = __stream.write_all(&(err_data.len() as u32 | 0x8000_0000).to_be_bytes()).await;
+                                let _ = __stream.write_all(&err_data).await;
                                 false
                             }
-                        }
+                        };
+                        let _ = __stream.close().await;
+                        ok
                     }
                 },
                 (false, true, true) => quote! {

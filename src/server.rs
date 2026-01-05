@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_broadcast::{Receiver, broadcast};
 use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
-use compio::io::{AsyncRead, AsyncReadAt, AsyncWriteAtExt, AsyncWriteExt};
+use compio::io::{AsyncRead, AsyncReadAt, AsyncWrite, AsyncWriteAtExt, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::runtime::spawn;
 use futures_util::FutureExt;
@@ -85,6 +85,10 @@ impl AsyncStreamCompat for TcpStreamCompat {
     async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
         self.0.write_all(data.to_vec()).await.result()?;
         Ok(())
+    }
+
+    async fn close(&mut self) -> io::Result<()> {
+        AsyncWrite::shutdown(&mut &self.0).await
     }
 }
 
@@ -238,6 +242,11 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         stream: &mut TcpStreamCompat,
         size: u64,
     ) -> Result<(), CacheError> {
+        if self.disk_cache.contains(id) {
+            debug!(shard_id = self.shard_id, id, "already cached");
+            return Err(CacheError::AlreadyExists(id.to_string()));
+        }
+
         let ranges = memory_cache_ranges
             .map(|r| r.into_inner())
             .unwrap_or_default();

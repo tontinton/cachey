@@ -22,6 +22,8 @@ pub enum CacheError {
     NotFound(NotFoundError),
     #[field(idx = 2)]
     Io(IoError),
+    #[field(idx = 3)]
+    AlreadyExists(String),
 }
 
 impl From<std::io::Error> for CacheError {

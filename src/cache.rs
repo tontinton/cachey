@@ -233,6 +233,10 @@ impl DiskCache {
         Some(self.generate_path(key))
     }
 
+    pub fn contains(&self, key: &str) -> bool {
+        self.inner.peek(key).is_some()
+    }
+
     pub fn insert(&self, key: CacheKey, size: u64) {
         self.inner.insert(key, size);
     }
