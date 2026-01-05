@@ -1,6 +1,7 @@
 use std::pin::pin;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use async_broadcast::broadcast;
 use cachey::MemorySemaphore;
@@ -10,6 +11,7 @@ use cachey::{
     args::{Args, parse_args},
     server,
 };
+use compio::driver::ProactorBuilder;
 use compio::runtime::spawn;
 use compio::signal::ctrl_c;
 use futures_util::future::select;
@@ -33,6 +35,17 @@ fn pin_to_core(core_id: usize) {
 #[cfg(not(target_os = "linux"))]
 fn pin_to_core(_core_id: usize) {}
 
+fn build_proactor() -> ProactorBuilder {
+    let mut builder = ProactorBuilder::new();
+    builder.capacity(4096);
+
+    // Poll a little before sleep.
+    #[cfg(target_os = "linux")]
+    builder.sqpoll_idle(Duration::from_millis(10));
+
+    builder
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_shard(
     shard_id: usize,
@@ -46,6 +59,7 @@ fn run_shard(
 ) {
     pin_to_core(shard_id);
     let rt = compio::runtime::RuntimeBuilder::new()
+        .with_proactor(build_proactor())
         .build()
         .expect("failed to build runtime");
 
@@ -109,6 +123,7 @@ fn main() -> eyre::Result<()> {
 
     let disk_path = args.disk_path.clone();
     compio::runtime::RuntimeBuilder::new()
+        .with_proactor(build_proactor())
         .build()
         .expect("failed to build init runtime")
         .block_on(async {
