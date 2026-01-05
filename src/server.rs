@@ -75,17 +75,19 @@ struct TcpStreamCompat(TcpStream);
 #[rsmp::stream_compat_local]
 impl AsyncStreamCompat for TcpStreamCompat {
     async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let len = buf.len();
+        if len == 0 {
+            return Ok(());
+        }
+        let mut tmp = Vec::with_capacity(len);
+        // SAFETY: self.0.read writes into buffer before we read from it
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            tmp.set_len(len);
+        }
         let mut filled = 0;
-        let mut tmp = Vec::with_capacity(buf.len());
-        while filled < buf.len() {
-            let remaining = buf.len() - filled;
-            tmp.reserve(remaining);
-            // SAFETY: self.0.read writes into buffer before we read from it
-            #[allow(clippy::uninit_vec)]
-            unsafe {
-                tmp.set_len(remaining);
-            }
-            let (n, returned) = self.0.read(tmp.slice(..remaining)).await.result()?;
+        while filled < len {
+            let (n, returned) = self.0.read(tmp.slice(filled..)).await.result()?;
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -93,9 +95,9 @@ impl AsyncStreamCompat for TcpStreamCompat {
                 ));
             }
             tmp = returned.into_inner();
-            buf[filled..filled + n].copy_from_slice(&tmp[..n]);
             filled += n;
         }
+        buf.copy_from_slice(&tmp[..len]);
         Ok(())
     }
 
@@ -117,7 +119,7 @@ pub struct CacheHandler {
 }
 
 impl CacheHandler {
-    async fn stream_buffer(data: Vec<u8>, stream: &mut TcpStreamCompat) -> io::Result<()> {
+    async fn stream_buffer(data: Arc<[u8]>, stream: &mut TcpStreamCompat) -> io::Result<()> {
         let len = data.len() as u64;
         stream
             .0
@@ -278,7 +280,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
                 id, offset, size, "memory cache hit"
             );
             let bytes_sent = data.len() as u64;
-            Self::stream_buffer(data.to_vec(), stream).await?;
+            Self::stream_buffer(data, stream).await?;
             METRICS
                 .bytes_read_total
                 .with_label_values(&[Self::GET_NAME])
