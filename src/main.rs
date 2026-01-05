@@ -4,7 +4,7 @@ use std::thread;
 
 use async_broadcast::broadcast;
 use cachey::MemorySemaphore;
-use cachey::cache::{CleanupReceiver, DiskCache, MemoryCache, run_cleanup_loop};
+use cachey::cache::{CleanupReceiver, DiskCache, MemoryCache, clear_cache_dir, run_cleanup_loop};
 use cachey::metrics;
 use cachey::{
     args::{Args, parse_args},
@@ -106,6 +106,17 @@ fn main() -> eyre::Result<()> {
     let num_shards = 1;
 
     info!(?args, num_shards, "Init");
+
+    let disk_path = args.disk_path.clone();
+    compio::runtime::RuntimeBuilder::new()
+        .build()
+        .expect("failed to build init runtime")
+        .block_on(async {
+            clear_cache_dir(&disk_path).await;
+            compio::fs::create_dir_all(&disk_path)
+                .await
+                .expect("failed to create cache directory");
+        });
 
     let (shutdown_tx, shutdown_rx) = broadcast::<()>(1);
     let (disk_cache, cleanup_rx) =

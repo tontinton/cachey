@@ -1,12 +1,16 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use compio::runtime::spawn;
 use dashmap::DashSet;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use quick_cache::{Lifecycle, Weighter, sync::Cache as QuickCache};
 use tracing::warn;
 
 const MAX_CLEANUP_TASKS_IN_QUEUE: usize = 1024;
+const CACHE_CLEAR_MOVED_CONCURRENCY: usize = 64;
+const CACHE_CLEAR_DELETE_CONCURRENCY: usize = 64;
 
 pub type CacheKey = String;
 pub type CleanupReceiver = flume::Receiver<PathBuf>;
@@ -185,6 +189,96 @@ impl Lifecycle<CacheKey, u64> for DiskEvictionLifecycle {
 pub async fn run_cleanup_loop(cleanup_rx: CleanupReceiver) {
     while let Ok(path) = cleanup_rx.recv_async().await {
         let _ = compio::fs::remove_file(path).await;
+    }
+}
+
+async fn remove_dir_all(path: PathBuf) -> std::io::Result<()> {
+    let metadata = compio::fs::symlink_metadata(&path).await?;
+    if metadata.is_dir() {
+        let entries: Vec<_> = std::fs::read_dir(&path)?.collect();
+        for entry in entries {
+            let entry = entry?;
+            Box::pin(remove_dir_all(entry.path())).await?;
+        }
+        compio::fs::remove_dir(&path).await
+    } else {
+        compio::fs::remove_file(&path).await
+    }
+}
+
+pub async fn clear_cache_dir(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+
+    let tmp_path = std::env::temp_dir().join(format!("cachey-old-cache-{}", std::process::id()));
+
+    match compio::fs::rename(path, &tmp_path).await {
+        Ok(()) => {
+            spawn(async move {
+                if let Err(e) = remove_dir_all(tmp_path.clone()).await {
+                    tracing::warn!(?tmp_path, error = %e, "failed to delete old cache directory");
+                }
+            })
+            .detach();
+        }
+        Err(e) => {
+            tracing::debug!(?path, error = %e, "rename failed, trying subdirectories");
+
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return;
+            };
+
+            let mut moved_dirs = Vec::new();
+            let mut dirs_to_delete = Vec::new();
+
+            for (idx, entry) in entries.flatten().enumerate() {
+                let entry_path = entry.path();
+                let tmp_subdir = std::env::temp_dir().join(format!(
+                    "cachey-subdir-{}-{}",
+                    std::process::id(),
+                    idx
+                ));
+
+                match compio::fs::rename(&entry_path, &tmp_subdir).await {
+                    Ok(()) => moved_dirs.push(tmp_subdir),
+                    Err(_) => dirs_to_delete.push(entry_path),
+                }
+            }
+
+            if !moved_dirs.is_empty() {
+                spawn(async move {
+                    let mut futures = FuturesUnordered::new();
+                    for dir in moved_dirs {
+                        futures.push(async move {
+                            if let Err(e) = remove_dir_all(dir.clone()).await {
+                                tracing::warn!(?dir, error = %e, "failed to delete moved subdirectory");
+                            }
+                        });
+                        if futures.len() >= CACHE_CLEAR_MOVED_CONCURRENCY {
+                            futures.next().await;
+                        }
+                    }
+                    while futures.next().await.is_some() {}
+                })
+                .detach();
+            }
+
+            if !dirs_to_delete.is_empty() {
+                let mut futures = FuturesUnordered::new();
+                for path in dirs_to_delete {
+                    futures.push(async move {
+                        if let Err(e) = remove_dir_all(path.clone()).await {
+                            tracing::warn!(?path, error = %e, "failed to delete cache subdirectory");
+                        }
+                    });
+                    if futures.len() >= CACHE_CLEAR_DELETE_CONCURRENCY {
+                        futures.next().await;
+                    }
+                }
+                while futures.next().await.is_some() {}
+            }
+        }
     }
 }
 
