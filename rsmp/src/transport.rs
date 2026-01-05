@@ -52,7 +52,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> StreamTransportLocal<S> {
         let is_error = (len_raw & 0x8000_0000) != 0;
         let len = (len_raw & 0x7FFF_FFFF) as usize;
 
-        let mut data = vec![0u8; len];
+        let mut data = Vec::with_capacity(len);
+        // SAFETY: read_exact fills the entire buffer before returning
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            data.set_len(len);
+        }
         read_exact(&mut self.stream, &mut data).await?;
 
         if is_error {
@@ -67,7 +72,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> StreamTransportLocal<S> {
         read_exact(&mut self.stream, &mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
-        let mut data = vec![0u8; len];
+        let mut data = Vec::with_capacity(len);
+        // SAFETY: read_exact fills the entire buffer before returning
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            data.set_len(len);
+        }
         read_exact(&mut self.stream, &mut data).await?;
 
         Ok(data)

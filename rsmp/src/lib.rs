@@ -180,7 +180,12 @@ impl RequestFrame {
 
         let args_len = len - 2;
         let args_data = if args_len > 0 {
-            let mut buf = vec![0u8; args_len];
+            let mut buf = Vec::with_capacity(args_len);
+            // SAFETY: read_exact fills the entire buffer before returning
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                buf.set_len(args_len);
+            }
             conn.read_exact(&mut buf).await?;
             buf
         } else {
@@ -273,7 +278,7 @@ pub type BoxAsyncReadLocal<'a> = Pin<Box<dyn AsyncRead + 'a>>;
 #[async_trait(?Send)]
 pub trait AsyncStreamCompat {
     async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()>;
-    async fn write_all(&mut self, data: &[u8]) -> io::Result<()>;
+    async fn write_all(&mut self, data: Vec<u8>) -> io::Result<()>;
     async fn close(&mut self) -> io::Result<()>;
 }
 

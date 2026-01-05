@@ -76,8 +76,15 @@ struct TcpStreamCompat(TcpStream);
 impl AsyncStreamCompat for TcpStreamCompat {
     async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         let mut filled = 0;
+        let mut tmp = Vec::with_capacity(buf.len());
         while filled < buf.len() {
-            let tmp = vec![0u8; buf.len() - filled];
+            let remaining = buf.len() - filled;
+            tmp.reserve(remaining);
+            // SAFETY: self.0.read writes into buffer before we read from it
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                tmp.set_len(remaining);
+            }
             let (n, returned) = self.0.read(tmp.slice(..)).await.result()?;
             if n == 0 {
                 return Err(io::Error::new(
@@ -85,14 +92,15 @@ impl AsyncStreamCompat for TcpStreamCompat {
                     "unexpected eof",
                 ));
             }
-            buf[filled..filled + n].copy_from_slice(&returned.into_inner()[..n]);
+            tmp = returned.into_inner();
+            buf[filled..filled + n].copy_from_slice(&tmp[..n]);
             filled += n;
         }
         Ok(())
     }
 
-    async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        self.0.write_all(data.to_vec()).await.result()?;
+    async fn write_all(&mut self, data: Vec<u8>) -> io::Result<()> {
+        self.0.write_all(data).await.result()?;
         Ok(())
     }
 
@@ -109,14 +117,14 @@ pub struct CacheHandler {
 }
 
 impl CacheHandler {
-    async fn stream_buffer(data: &[u8], stream: &mut TcpStreamCompat) -> io::Result<()> {
+    async fn stream_buffer(data: Vec<u8>, stream: &mut TcpStreamCompat) -> io::Result<()> {
         let len = data.len() as u64;
         stream
             .0
             .write_all(len.to_be_bytes().to_vec())
             .await
             .result()?;
-        stream.0.write_all(data.to_vec()).await.result()?;
+        stream.0.write_all(data).await.result()?;
         Ok(())
     }
 
@@ -137,17 +145,24 @@ impl CacheHandler {
 
         let mut current_offset = offset;
         let end_offset = offset + actual_size;
+        let mut buf = Vec::with_capacity(STREAM_FILE_BUF_SIZE);
 
         while current_offset < end_offset {
             let to_read = ((end_offset - current_offset) as usize).min(STREAM_FILE_BUF_SIZE);
-            let buf = vec![0u8; to_read];
-            let (n, buf) = file.read_at(buf, current_offset).await.result()?;
+            buf.reserve(to_read);
+            // SAFETY: file.read_at writes into buffer before we read from it
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                buf.set_len(to_read);
+            }
+            let (n, returned) = file.read_at(buf, current_offset).await.result()?;
             if n == 0 {
                 break;
             }
+            buf = returned;
             let to_write = n.min((end_offset - current_offset) as usize);
-            let write_buf = buf.slice(..to_write);
-            let ((), _) = stream.0.write_all(write_buf).await.result()?;
+            let ((), returned) = stream.0.write_all(buf.slice(..to_write)).await.result()?;
+            buf = returned.into_inner();
             current_offset += to_write as u64;
         }
 
@@ -172,21 +187,25 @@ impl CacheHandler {
         let mut file_offset = 0u64;
         while file_offset < size {
             let to_read = ((size - file_offset) as usize).min(STREAM_FILE_BUF_SIZE);
-            buf.resize(to_read, 0);
+            buf.reserve(to_read);
+            // SAFETY: stream.0.read writes into buffer before we read from it
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                buf.set_len(to_read);
+            }
             let (n, read_buf) = stream.0.read(buf).await.result()?;
             if n == 0 {
                 break;
             }
             buf = read_buf;
-
             if !captures.is_empty() {
                 capture_ranges_from_chunk(&buf[..n], file_offset, &mut captures);
             }
-
-            let slice = buf.slice(..n);
-            let ((), slice) = file.write_all_at(slice, file_offset).await.result()?;
+            let ((), slice) = file
+                .write_all_at(buf.slice(..n), file_offset)
+                .await
+                .result()?;
             buf = slice.into_inner();
-            buf.clear();
             file_offset += n as u64;
         }
 
@@ -259,7 +278,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
                 id, offset, size, "memory cache hit"
             );
             let bytes_sent = data.len() as u64;
-            Self::stream_buffer(&data, stream).await?;
+            Self::stream_buffer(data.to_vec(), stream).await?;
             METRICS
                 .bytes_read_total
                 .with_label_values(&[Self::GET_NAME])
