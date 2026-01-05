@@ -121,11 +121,7 @@ pub struct CacheHandler {
 impl CacheHandler {
     async fn stream_buffer(data: Arc<[u8]>, stream: &mut TcpStreamCompat) -> io::Result<()> {
         let len = data.len() as u64;
-        stream
-            .0
-            .write_all(len.to_be_bytes().to_vec())
-            .await
-            .result()?;
+        stream.0.write_all(len.to_be_bytes()).await.result()?;
         stream.0.write_all(data).await.result()?;
         Ok(())
     }
@@ -141,7 +137,7 @@ impl CacheHandler {
 
         stream
             .0
-            .write_all(actual_size.to_be_bytes().to_vec())
+            .write_all(actual_size.to_be_bytes())
             .await
             .result()?;
 
