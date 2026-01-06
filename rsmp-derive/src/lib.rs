@@ -833,7 +833,6 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                                 false
                             }
                         };
-                        let _ = __stream.close().await;
                         ok
                     }
                 },
@@ -855,7 +854,6 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                                 false
                             }
                         };
-                        let _ = __stream.close().await;
                         ok
                     }
                 },
@@ -878,7 +876,6 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                                 false
                             }
                         };
-                        let _ = __stream.close().await;
                         ok
                     }
                 },
@@ -899,7 +896,6 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                                 false
                             }
                         };
-                        let _ = __stream.close().await;
                         ok
                     }
                 },

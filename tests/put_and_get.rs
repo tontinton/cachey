@@ -629,3 +629,43 @@ fn health_endpoint_returns_ok() {
             assert!(response.contains("OK"));
         });
 }
+
+#[test]
+fn connection_reuse_after_put() {
+    let server = TestServer::start();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+
+            let large_data: Vec<u8> = (0u8..=255).cycle().take(64 * 1024).collect();
+
+            client
+                .put("file1", None, Stream::from_vec(large_data.clone()))
+                .await
+                .unwrap();
+
+            client
+                .put("file2", None, Stream::from_vec(large_data.clone()))
+                .await
+                .unwrap();
+
+            match client
+                .put("file1", None, Stream::from_vec(large_data))
+                .await
+            {
+                Err(rsmp::ClientError::Server(cachey::proto::CacheError::AlreadyExists(_))) => {}
+                other => panic!("expected AlreadyExists, got {:?}", other.map(|_| ())),
+            }
+
+            let mut body = client.get("file1", 0, 1024).await.unwrap();
+            let mut data = vec![0u8; 1024];
+            body.read_exact(&mut data).await.unwrap();
+            let expected: Vec<u8> = (0u8..=255).cycle().take(1024).collect();
+            assert_eq!(data, expected);
+        });
+}

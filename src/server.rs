@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_broadcast::{Receiver, broadcast};
 use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
-use compio::io::{AsyncRead, AsyncReadAt, AsyncWrite, AsyncWriteAtExt, AsyncWriteExt};
+use compio::io::{AsyncRead, AsyncReadAt, AsyncWriteAtExt, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::runtime::spawn;
 use futures_util::FutureExt;
@@ -104,10 +104,6 @@ impl AsyncStreamCompat for TcpStreamCompat {
     async fn write_all(&mut self, data: Vec<u8>) -> io::Result<()> {
         self.0.write_all(data).await.result()?;
         Ok(())
-    }
-
-    async fn close(&mut self) -> io::Result<()> {
-        AsyncWrite::shutdown(&mut &self.0).await
     }
 }
 

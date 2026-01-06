@@ -305,7 +305,6 @@ pub type BoxAsyncReadLocal<'a> = Pin<Box<dyn AsyncRead + 'a>>;
 pub trait AsyncStreamCompat {
     async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()>;
     async fn write_all(&mut self, data: Vec<u8>) -> io::Result<()>;
-    async fn close(&mut self) -> io::Result<()>;
 }
 
 pub use transport::Response;
