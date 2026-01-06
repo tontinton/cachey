@@ -36,6 +36,8 @@ impl TestServer {
     }
 
     fn start_with_memory_cache_size(memory_cache_size: ByteSize) -> Self {
+        // QuickCache shards capacity by (num_cpus * 4), so each shard gets capacity/(num_cpus*4).
+        // Use a large disk_cache_size to ensure items fit within a single shard's capacity.
         Self::start_with_config(ByteSize::gib(1), memory_cache_size, None)
     }
 
@@ -556,8 +558,6 @@ fn sequential_requests_complete_under_memory_pressure() {
 
 #[test]
 fn put_existing_file_large_body_returns_already_exists() {
-    // QuickCache shards capacity by (num_cpus * 4), so each shard gets capacity/(num_cpus*4).
-    // Use a large disk_cache_size to ensure items fit within a single shard's capacity.
     let server = TestServer::start();
     let large_data: Vec<u8> = (0u8..=255).cycle().take(512 * 1024).collect();
 
