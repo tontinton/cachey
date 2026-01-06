@@ -15,11 +15,11 @@ use compio::driver::ProactorBuilder;
 use compio::runtime::spawn;
 use compio::signal::ctrl_c;
 use futures_util::future::select;
-use mimalloc::MiMalloc;
+use tikv_jemallocator::Jemalloc;
 use tracing::info;
 
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[cfg(target_os = "linux")]
 fn pin_to_core(core_id: usize) {
