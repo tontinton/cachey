@@ -21,7 +21,7 @@ futures-util = "0.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter"] }
 num_cpus = "1.17.0"
-quick_cache = { version = "0.6", features = ["stats"] }
+quick_cache = "0.6"
 dashmap = "6"
 flume = "0.11"
 bytesize = "2.3.1"

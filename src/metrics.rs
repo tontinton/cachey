@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use compio::buf::IoBuf;
@@ -5,8 +6,8 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::runtime::spawn;
 use prometheus::{
-    Histogram, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder, register_histogram,
-    register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+    GaugeVec, Histogram, IntCounterVec, IntGauge, IntGaugeVec, TextEncoder, register_gauge_vec,
+    register_histogram, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
 };
 use tracing::{debug, error};
 
@@ -35,8 +36,9 @@ pub struct Metrics {
     pub cache_items: IntGaugeVec,
     pub cache_weight_bytes: IntGaugeVec,
     pub cache_capacity_bytes: IntGaugeVec,
-    pub cache_hits_total: IntGaugeVec,
-    pub cache_misses_total: IntGaugeVec,
+    pub cache_hits_total: IntCounterVec,
+    pub cache_misses_total: IntCounterVec,
+    pub cache_hit_rate: GaugeVec,
     pub cache_evictions_total: IntGaugeVec,
     pub cache_evicted_bytes_total: IntGaugeVec,
 
@@ -46,6 +48,12 @@ pub struct Metrics {
     // Memory semaphore metrics
     pub memory_semaphore_capacity_bytes: IntGauge,
     pub memory_semaphore_allocated_bytes: IntGauge,
+
+    // Internal tracking (to calculate metrics)
+    last_disk_hits: AtomicU64,
+    last_disk_misses: AtomicU64,
+    last_memory_hits: AtomicU64,
+    last_memory_misses: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -106,19 +114,26 @@ impl Default for Metrics {
             )
             .expect("create cache_capacity_bytes"),
 
-            cache_hits_total: register_int_gauge_vec!(
+            cache_hits_total: register_int_counter_vec!(
                 "cachey_cache_hits_total",
                 "Total number of cache hits",
                 &["type"]
             )
             .expect("create cache_hits_total"),
 
-            cache_misses_total: register_int_gauge_vec!(
+            cache_misses_total: register_int_counter_vec!(
                 "cachey_cache_misses_total",
                 "Total number of cache misses",
                 &["type"]
             )
             .expect("create cache_misses_total"),
+
+            cache_hit_rate: register_gauge_vec!(
+                "cachey_cache_hit_rate",
+                "Cache hit rate ratio (hits / total requests)",
+                &["type"]
+            )
+            .expect("create cache_hit_rate"),
 
             cache_evictions_total: register_int_gauge_vec!(
                 "cachey_cache_evictions_total",
@@ -151,6 +166,11 @@ impl Default for Metrics {
                 "Currently allocated bytes in the memory semaphore"
             )
             .expect("create memory_semaphore_allocated_bytes"),
+
+            last_disk_hits: AtomicU64::new(0),
+            last_disk_misses: AtomicU64::new(0),
+            last_memory_hits: AtomicU64::new(0),
+            last_memory_misses: AtomicU64::new(0),
         }
     }
 }
@@ -171,12 +191,6 @@ impl Metrics {
         self.cache_capacity_bytes
             .with_label_values(&[LABEL_DISK])
             .set(disk_cache.capacity() as i64);
-        self.cache_hits_total
-            .with_label_values(&[LABEL_DISK])
-            .set(disk_cache.hits() as i64);
-        self.cache_misses_total
-            .with_label_values(&[LABEL_DISK])
-            .set(disk_cache.misses() as i64);
         self.cache_evictions_total
             .with_label_values(&[LABEL_DISK])
             .set(disk_cache.evictions() as i64);
@@ -195,12 +209,6 @@ impl Metrics {
         self.cache_capacity_bytes
             .with_label_values(&[LABEL_MEMORY])
             .set(memory_cache.capacity() as i64);
-        self.cache_hits_total
-            .with_label_values(&[LABEL_MEMORY])
-            .set(memory_cache.hits() as i64);
-        self.cache_misses_total
-            .with_label_values(&[LABEL_MEMORY])
-            .set(memory_cache.misses() as i64);
         self.cache_evictions_total
             .with_label_values(&[LABEL_MEMORY])
             .set(memory_cache.evictions() as i64);
@@ -208,10 +216,61 @@ impl Metrics {
             .with_label_values(&[LABEL_MEMORY])
             .set(memory_cache.evicted_bytes() as i64);
 
+        self.update_hit_miss_counters(
+            LABEL_DISK,
+            disk_cache.hits(),
+            disk_cache.misses(),
+            &self.last_disk_hits,
+            &self.last_disk_misses,
+        );
+        self.update_hit_miss_counters(
+            LABEL_MEMORY,
+            memory_cache.hits(),
+            memory_cache.misses(),
+            &self.last_memory_hits,
+            &self.last_memory_misses,
+        );
+
         self.memory_semaphore_capacity_bytes
             .set(memory_semaphore.capacity_bytes() as i64);
         self.memory_semaphore_allocated_bytes
             .set(memory_semaphore.allocated_bytes() as i64);
+    }
+
+    fn update_hit_miss_counters(
+        &self,
+        label: &str,
+        hits: u64,
+        misses: u64,
+        last_hits: &AtomicU64,
+        last_misses: &AtomicU64,
+    ) {
+        let prev_hits = last_hits.swap(hits, Ordering::Relaxed);
+        let prev_misses = last_misses.swap(misses, Ordering::Relaxed);
+
+        let hit_delta = hits.saturating_sub(prev_hits);
+        let miss_delta = misses.saturating_sub(prev_misses);
+
+        if hit_delta > 0 {
+            self.cache_hits_total
+                .with_label_values(&[label])
+                .inc_by(hit_delta);
+        }
+        if miss_delta > 0 {
+            self.cache_misses_total
+                .with_label_values(&[label])
+                .inc_by(miss_delta);
+        }
+
+        let total = hits + misses;
+        let hit_rate = if total > 0 {
+            hits as f64 / total as f64
+        } else {
+            0.0
+        };
+        self.cache_hit_rate
+            .with_label_values(&[label])
+            .set(hit_rate);
     }
 }
 

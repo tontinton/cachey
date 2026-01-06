@@ -46,22 +46,42 @@ impl Weighter<ChunkKey, Arc<[u8]>> for ChunkWeighter {
     }
 }
 
-struct EvictionStats {
+struct CacheStats {
+    hits: AtomicU64,
+    misses: AtomicU64,
     evictions: AtomicU64,
     evicted_bytes: AtomicU64,
 }
 
-impl EvictionStats {
+impl CacheStats {
     fn new() -> Self {
         Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             evicted_bytes: AtomicU64::new(0),
         }
     }
 
-    fn record(&self, bytes: u64) {
+    fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_eviction(&self, bytes: u64) {
         self.evictions.fetch_add(1, Ordering::Relaxed);
         self.evicted_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
     }
 
     fn evictions(&self) -> u64 {
@@ -75,7 +95,7 @@ impl EvictionStats {
 
 #[derive(Clone)]
 struct MemoryEvictionLifecycle {
-    stats: Arc<EvictionStats>,
+    stats: Arc<CacheStats>,
 }
 
 impl Lifecycle<ChunkKey, Arc<[u8]>> for MemoryEvictionLifecycle {
@@ -84,7 +104,7 @@ impl Lifecycle<ChunkKey, Arc<[u8]>> for MemoryEvictionLifecycle {
     fn begin_request(&self) -> Self::RequestState {}
 
     fn on_evict(&self, _state: &mut Self::RequestState, _key: ChunkKey, val: Arc<[u8]>) {
-        self.stats.record(val.len() as u64);
+        self.stats.record_eviction(val.len() as u64);
     }
 }
 
@@ -98,13 +118,13 @@ type InnerMemoryCache = QuickCache<
 
 pub struct MemoryCache {
     inner: InnerMemoryCache,
-    stats: Arc<EvictionStats>,
+    stats: Arc<CacheStats>,
 }
 
 impl MemoryCache {
     pub fn new(capacity_bytes: u64) -> Self {
         let estimated_items = (capacity_bytes / 65536).max(16) as usize;
-        let stats = Arc::new(EvictionStats::new());
+        let stats = Arc::new(CacheStats::new());
         let lifecycle = MemoryEvictionLifecycle {
             stats: Arc::clone(&stats),
         };
@@ -125,7 +145,13 @@ impl MemoryCache {
 
     pub fn get(&self, id: &str, start: u64, end: u64) -> Option<Arc<[u8]>> {
         let key = ChunkKey::new(id.to_owned(), start, end);
-        self.inner.get(&key)
+        let result = self.inner.get(&key);
+        if result.is_some() {
+            self.stats.record_hit();
+        } else {
+            self.stats.record_miss();
+        }
+        result
     }
 
     pub fn len(&self) -> usize {
@@ -145,11 +171,11 @@ impl MemoryCache {
     }
 
     pub fn hits(&self) -> u64 {
-        self.inner.hits()
+        self.stats.hits()
     }
 
     pub fn misses(&self) -> u64 {
-        self.inner.misses()
+        self.stats.misses()
     }
 
     pub fn evictions(&self) -> u64 {
@@ -165,7 +191,7 @@ impl MemoryCache {
 struct DiskEvictionLifecycle {
     dir: PathBuf,
     cleanup_tx: flume::Sender<PathBuf>,
-    stats: Arc<EvictionStats>,
+    stats: Arc<CacheStats>,
 }
 
 impl Lifecycle<CacheKey, u64> for DiskEvictionLifecycle {
@@ -174,7 +200,7 @@ impl Lifecycle<CacheKey, u64> for DiskEvictionLifecycle {
     fn begin_request(&self) -> Self::RequestState {}
 
     fn on_evict(&self, _state: &mut Self::RequestState, key: CacheKey, size: u64) {
-        self.stats.record(size);
+        self.stats.record_eviction(size);
         let path = self.dir.join(sanitize_key(&key));
         if self.cleanup_tx.try_send(path.clone()).is_err() {
             warn!(
@@ -288,7 +314,7 @@ type InnerDiskCache =
 pub struct DiskCache {
     dir: PathBuf,
     inner: InnerDiskCache,
-    stats: Arc<EvictionStats>,
+    stats: Arc<CacheStats>,
     cleanup_tx: flume::Sender<PathBuf>,
     writing: DashSet<String>,
 }
@@ -296,7 +322,7 @@ pub struct DiskCache {
 impl DiskCache {
     pub fn new(dir: PathBuf, capacity_bytes: u64) -> (Self, CleanupReceiver) {
         let (cleanup_tx, cleanup_rx) = flume::bounded(MAX_CLEANUP_TASKS_IN_QUEUE);
-        let stats = Arc::new(EvictionStats::new());
+        let stats = Arc::new(CacheStats::new());
         let lifecycle = DiskEvictionLifecycle {
             dir: dir.clone(),
             cleanup_tx: cleanup_tx.clone(),
@@ -326,8 +352,14 @@ impl DiskCache {
     }
 
     pub fn get(&self, key: &str) -> Option<PathBuf> {
-        self.inner.get(key)?;
-        Some(self.generate_path(key))
+        let result = self.inner.get(key);
+        if result.is_some() {
+            self.stats.record_hit();
+            Some(self.generate_path(key))
+        } else {
+            self.stats.record_miss();
+            None
+        }
     }
 
     pub fn contains(&self, key: &str) -> bool {
@@ -355,11 +387,11 @@ impl DiskCache {
     }
 
     pub fn hits(&self) -> u64 {
-        self.inner.hits()
+        self.stats.hits()
     }
 
     pub fn misses(&self) -> u64 {
-        self.inner.misses()
+        self.stats.misses()
     }
 
     pub fn evictions(&self) -> u64 {
