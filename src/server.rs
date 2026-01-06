@@ -13,7 +13,7 @@ use compio::runtime::spawn;
 use futures_util::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use prometheus::HistogramTimer;
-use rsmp::{AsyncStreamCompat, CallContext, Interceptor};
+use rsmp::{AsyncStreamCompat, CallContext, Interceptor, ReqBody};
 use tracing::{debug, error, info};
 
 use crate::cache::{DiskCache, MemoryCache};
@@ -314,7 +314,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
         &self,
         id: &str,
         memory_cache_ranges: Option<MemoryCacheRanges>,
-        stream: &mut TcpStreamCompat,
+        body: &mut ReqBody<'_, TcpStreamCompat>,
         size: u64,
     ) -> Result<(), CacheError> {
         if self.disk_cache.contains(id) || !self.disk_cache.start_writing(id) {
@@ -325,6 +325,7 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
             return Err(CacheError::AlreadyExists(id.to_string()));
         }
 
+        let stream = body.start().await?;
         let result = self.put_inner(id, memory_cache_ranges, stream, size).await;
         self.disk_cache.finish_writing(id);
         result

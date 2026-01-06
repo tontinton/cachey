@@ -36,10 +36,14 @@ impl TestServer {
     }
 
     fn start_with_memory_cache_size(memory_cache_size: ByteSize) -> Self {
-        Self::start_with_config(memory_cache_size, None)
+        Self::start_with_config(ByteSize::gib(1), memory_cache_size, None)
     }
 
-    fn start_with_config(memory_cache_size: ByteSize, memory_limit: Option<ByteSize>) -> Self {
+    fn start_with_config(
+        disk_cache_size: ByteSize,
+        memory_cache_size: ByteSize,
+        memory_limit: Option<ByteSize>,
+    ) -> Self {
         let temp_dir = tempfile::tempdir().unwrap();
         let port = get_free_port();
         let addr = format!("127.0.0.1:{}", port);
@@ -50,7 +54,7 @@ impl TestServer {
             listen: addr.clone(),
             num_listeners: 1,
             disk_path: temp_dir.path().to_path_buf(),
-            disk_cache_size: ByteSize::mib(10),
+            disk_cache_size,
             memory_cache_size,
             metrics_listen: metrics_addr.clone(),
             memory_limit,
@@ -521,7 +525,8 @@ fn get_range_past_eof_returns_partial_data() {
 #[test]
 fn sequential_requests_complete_under_memory_pressure() {
     let data: Vec<u8> = (0u8..=255).cycle().take(256 * 1024).collect();
-    let server = TestServer::start_with_config(ByteSize::kib(64), Some(ByteSize::mib(1)));
+    let server =
+        TestServer::start_with_config(ByteSize::gib(1), ByteSize::kib(64), Some(ByteSize::mib(1)));
 
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -547,6 +552,57 @@ fn sequential_requests_complete_under_memory_pressure() {
                 assert_eq!(received.len(), 256 * 1024);
             }
         });
+}
+
+#[test]
+fn put_existing_file_large_body_returns_already_exists() {
+    // QuickCache shards capacity by (num_cpus * 4), so each shard gets capacity/(num_cpus*4).
+    // Use a large disk_cache_size to ensure items fit within a single shard's capacity.
+    let server = TestServer::start();
+    let large_data: Vec<u8> = (0u8..=255).cycle().take(512 * 1024).collect();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+            client
+                .put("large-file", None, Stream::from_vec(large_data.clone()))
+                .await
+                .unwrap();
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+            let mut body = client.get("large-file", 0, 100).await.unwrap();
+            let mut buf = vec![0u8; 100];
+            body.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf[..], &large_data[..100]);
+
+            let stream = connect_tokio(server.addr()).await;
+            let mut client = CacheServiceClient::from_stream(stream.compat());
+            let result = client
+                .put("large-file", None, Stream::from_vec(large_data.clone()))
+                .await;
+
+            match result {
+                Err(rsmp::ClientError::Server(cachey::proto::CacheError::AlreadyExists(id))) => {
+                    assert_eq!(id, "large-file");
+                }
+                Err(rsmp::ClientError::Transport(e)) => {
+                    panic!(
+                        "got transport error instead of AlreadyExists: {:?} \
+                        (this indicates the early rejection protocol is broken)",
+                        e
+                    );
+                }
+                other => panic!("expected AlreadyExists error, got {:?}", other.map(|_| ())),
+            }
+        });
+
+    assert_eq!(server.disk_cache.len(), 1);
+    assert_eq!(server.disk_cache.weight(), large_data.len() as u64);
 }
 
 #[test]

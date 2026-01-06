@@ -726,22 +726,22 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 (true, true, true) => {
                     let resp_ty = m.response_ty.as_ref().unwrap();
                     quote! {
-                        async fn #name(&self, #(#arg_params,)* stream: &mut C, req_size: u64) -> Result<#resp_ty, #err_ty>;
+                        async fn #name(&self, #(#arg_params,)* stream: &mut rsmp::ReqBody<'_, C>, req_size: u64) -> Result<#resp_ty, #err_ty>;
                     }
                 },
                 (true, true, false) => {
                     quote! {
-                        async fn #name(&self, #(#arg_params,)* stream: &mut C, req_size: u64) -> Result<(), #err_ty>;
+                        async fn #name(&self, #(#arg_params,)* stream: &mut rsmp::ReqBody<'_, C>, req_size: u64) -> Result<(), #err_ty>;
                     }
                 },
                 (true, false, true) => {
                     let resp_ty = m.response_ty.as_ref().unwrap();
                     quote! {
-                        async fn #name(&self, #(#arg_params,)* stream: &mut C, size: u64) -> Result<#resp_ty, #err_ty>;
+                        async fn #name(&self, #(#arg_params,)* stream: &mut rsmp::ReqBody<'_, C>, size: u64) -> Result<#resp_ty, #err_ty>;
                     }
                 },
                 (true, false, false) => quote! {
-                    async fn #name(&self, #(#arg_params,)* stream: &mut C, size: u64) -> Result<(), #err_ty>;
+                    async fn #name(&self, #(#arg_params,)* stream: &mut rsmp::ReqBody<'_, C>, size: u64) -> Result<(), #err_ty>;
                 },
                 (false, true, true) => {
                     let resp_ty = m.response_ty.as_ref().unwrap();
@@ -818,12 +818,17 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 (true, true, true) => quote! {
                     #idx => {
                         #(#decode_args)*
-                        let ok = match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                        let mut __body = rsmp::ReqBody::new(__stream);
+                        let ok = match __handler.#name(#(#call_args,)* &mut __body, __req_size).await {
                             Ok(_result) => true,
                             Err(e) => {
-                                let _ = __stream.write_all(rsmp::ERROR_MARKER.to_be_bytes().to_vec()).await;
                                 let err_data = rsmp::Args::encode_args(&e);
-                                let _ = __stream.write_all((err_data.len() as u32).to_be_bytes().to_vec()).await;
+                                if __body.started() {
+                                    let _ = __stream.write_all(rsmp::ERROR_MARKER.to_be_bytes().to_vec()).await;
+                                    let _ = __stream.write_all((err_data.len() as u32).to_be_bytes().to_vec()).await;
+                                } else {
+                                    let _ = __stream.write_all((err_data.len() as u32 | 0x8000_0000).to_be_bytes().to_vec()).await;
+                                }
                                 let _ = __stream.write_all(err_data).await;
                                 false
                             }
@@ -835,12 +840,17 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 (true, true, false) => quote! {
                     #idx => {
                         #(#decode_args)*
-                        let ok = match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                        let mut __body = rsmp::ReqBody::new(__stream);
+                        let ok = match __handler.#name(#(#call_args,)* &mut __body, __req_size).await {
                             Ok(()) => true,
                             Err(e) => {
-                                let _ = __stream.write_all(rsmp::ERROR_MARKER.to_be_bytes().to_vec()).await;
                                 let err_data = rsmp::Args::encode_args(&e);
-                                let _ = __stream.write_all((err_data.len() as u32).to_be_bytes().to_vec()).await;
+                                if __body.started() {
+                                    let _ = __stream.write_all(rsmp::ERROR_MARKER.to_be_bytes().to_vec()).await;
+                                    let _ = __stream.write_all((err_data.len() as u32).to_be_bytes().to_vec()).await;
+                                } else {
+                                    let _ = __stream.write_all((err_data.len() as u32 | 0x8000_0000).to_be_bytes().to_vec()).await;
+                                }
                                 let _ = __stream.write_all(err_data).await;
                                 false
                             }
@@ -852,8 +862,10 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 (true, false, true) => quote! {
                     #idx => {
                         #(#decode_args)*
-                        let ok = match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                        let mut __body = rsmp::ReqBody::new(__stream);
+                        let ok = match __handler.#name(#(#call_args,)* &mut __body, __req_size).await {
                             Ok(result) => {
+                                let _ = __body.start().await;
                                 let response = rsmp::Args::encode_args(&result);
                                 let _ = __stream.write_all((response.len() as u32).to_be_bytes().to_vec()).await;
                                 let _ = __stream.write_all(response).await;
@@ -873,8 +885,10 @@ fn impl_service(input: &ItemTrait, error_ty: Option<Type>) -> syn::Result<TokenS
                 (true, false, false) => quote! {
                     #idx => {
                         #(#decode_args)*
-                        let ok = match __handler.#name(#(#call_args,)* __stream, __req_size).await {
+                        let mut __body = rsmp::ReqBody::new(__stream);
+                        let ok = match __handler.#name(#(#call_args,)* &mut __body, __req_size).await {
                             Ok(()) => {
+                                let _ = __body.start().await;
                                 let _ = __stream.write_all(0u32.to_be_bytes().to_vec()).await;
                                 true
                             }

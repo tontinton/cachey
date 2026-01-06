@@ -9,6 +9,7 @@ use crate::{
     BoxAsyncRead, BoxAsyncReadLocal, StreamResult, Transport, TransportError, ERROR_MARKER,
 };
 
+#[derive(Debug)]
 pub enum Response {
     Ok(Vec<u8>),
     Err(Vec<u8>),
@@ -132,6 +133,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport for StreamTransportLocal<S> {
     ) -> Result<Response, TransportError> {
         self.write_frame(method_id, args_data).await?;
         write_all(&mut self.stream, &body_size.to_be_bytes()).await?;
+
+        let ack = self.read_response().await?;
+        if let Response::Err(_) = ack {
+            return Ok(ack);
+        }
+
         self.write_body(body, body_size).await?;
         self.read_response().await
     }
@@ -192,6 +199,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport for StreamTransportLocal<S> {
     ) -> StreamResult<(Vec<u8>, Self::BoxRead<'_>)> {
         self.write_frame(method_id, args_data).await?;
         write_all(&mut self.stream, &body_size.to_be_bytes()).await?;
+
+        let ack = self.read_response().await?;
+        if let Response::Err(err) = ack {
+            return Ok(Err(err));
+        }
+
         self.write_body(body, body_size).await?;
 
         let response = match self.read_response().await? {
@@ -238,6 +251,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for StreamTransport<S> 
     ) -> Result<Response, TransportError> {
         self.0.write_frame(method_id, args_data).await?;
         write_all(&mut self.0.stream, &body_size.to_be_bytes()).await?;
+
+        let ack = self.0.read_response().await?;
+        if let Response::Err(_) = ack {
+            return Ok(ack);
+        }
+
         self.0.write_body(body, body_size).await?;
         self.0.read_response().await
     }
@@ -298,6 +317,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for StreamTransport<S> 
     ) -> StreamResult<(Vec<u8>, Self::BoxRead<'_>)> {
         self.0.write_frame(method_id, args_data).await?;
         write_all(&mut self.0.stream, &body_size.to_be_bytes()).await?;
+
+        let ack = self.0.read_response().await?;
+        if let Response::Err(err) = ack {
+            return Ok(Err(err));
+        }
+
         self.0.write_body(body, body_size).await?;
 
         let response = match self.0.read_response().await? {

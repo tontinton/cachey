@@ -220,6 +220,32 @@ pub enum ServiceError {
 
 pub const ERROR_MARKER: u64 = u64::MAX;
 
+pub struct ReqBody<'a, C: AsyncStreamCompat> {
+    inner: &'a mut C,
+    started: bool,
+}
+
+impl<'a, C: AsyncStreamCompat> ReqBody<'a, C> {
+    pub fn new(inner: &'a mut C) -> Self {
+        Self {
+            inner,
+            started: false,
+        }
+    }
+
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    pub async fn start(&mut self) -> io::Result<&mut C> {
+        if !self.started {
+            self.started = true;
+            self.inner.write_all(0u32.to_be_bytes().to_vec()).await?;
+        }
+        Ok(self.inner)
+    }
+}
+
 pub struct CallContext<'a> {
     pub method_id: FieldIndex,
     pub method_name: &'a str,
