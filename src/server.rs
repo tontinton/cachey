@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_broadcast::{Receiver, broadcast};
 use compio::buf::{IntoInner, IoBuf};
-use compio::fs::File;
+use compio::fs::{File, remove_file};
 use compio::io::{AsyncRead, AsyncReadAt, AsyncWriteAtExt, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::runtime::spawn;
@@ -14,7 +14,7 @@ use futures_util::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use prometheus::HistogramTimer;
 use rsmp::{AsyncStreamCompat, CallContext, Interceptor, ReqBody};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::cache::{DiskCache, MemoryCache};
 use crate::metrics::{LABEL_ERROR, LABEL_SUCCESS, METRICS};
@@ -227,7 +227,16 @@ impl CacheHandler {
 
         let mut file = File::create(&path).await?;
 
-        let captures = Self::stream_to_file(stream, &mut file, size, ranges).await?;
+        let captures = match Self::stream_to_file(stream, &mut file, size, ranges).await {
+            Ok(c) => c,
+            Err(e) => {
+                drop(file);
+                if let Err(remove_err) = remove_file(&path).await {
+                    warn!(?path, %remove_err, "failed to remove partial file after stream error");
+                }
+                return Err(e.into());
+            }
+        };
 
         for (range, data) in captures {
             if data.len() as u64 == range.end - range.start {
