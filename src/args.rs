@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use bytesize::ByteSize;
 use clap::Parser;
@@ -38,12 +39,22 @@ pub struct Args {
     /// Defaults to 100GiB if not specified.
     #[clap(long, value_parser = parse_bytes)]
     pub memory_limit: Option<ByteSize>,
+
+    /// Enable io_uring submission queue polling with specified idle timeout.
+    /// Trades CPU for lower latency. Example: --sqpoll-idle 10ms
+    #[clap(long, value_parser = parse_duration)]
+    pub sqpoll_idle: Option<Duration>,
 }
 
 fn parse_bytes(s: &str) -> Result<ByteSize, String> {
     s.parse::<ByteSize>().map_err(|e| {
         format!("Invalid memory size: {e}. Use formats like '512MiB', '2GB', '1.5GiB'",)
     })
+}
+
+fn parse_duration(s: &str) -> Result<Duration, String> {
+    humantime::parse_duration(s)
+        .map_err(|e| format!("Invalid duration: {e}. Use formats like '10ms', '1s', '500us'"))
 }
 
 #[must_use]

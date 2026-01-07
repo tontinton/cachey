@@ -60,6 +60,7 @@ impl TestServer {
             memory_cache_size,
             metrics_listen: metrics_addr.clone(),
             memory_limit,
+            sqpoll_idle: None,
         };
 
         let (shutdown_tx, shutdown_rx) = broadcast::<()>(1);

@@ -35,13 +35,14 @@ fn pin_to_core(core_id: usize) {
 #[cfg(not(target_os = "linux"))]
 fn pin_to_core(_core_id: usize) {}
 
-fn build_proactor() -> ProactorBuilder {
+fn build_proactor(sqpoll_idle: Option<Duration>) -> ProactorBuilder {
     let mut builder = ProactorBuilder::new();
     builder.capacity(4096);
 
-    // Poll a little before sleep.
     #[cfg(target_os = "linux")]
-    builder.sqpoll_idle(Duration::from_millis(10));
+    if let Some(idle) = sqpoll_idle {
+        builder.sqpoll_idle(idle);
+    }
 
     builder
 }
@@ -59,7 +60,7 @@ fn run_shard(
 ) {
     pin_to_core(shard_id);
     let rt = compio::runtime::RuntimeBuilder::new()
-        .with_proactor(build_proactor())
+        .with_proactor(build_proactor(args.sqpoll_idle))
         .build()
         .expect("failed to build runtime");
 
@@ -123,7 +124,7 @@ fn main() -> eyre::Result<()> {
 
     let disk_path = args.disk_path.clone();
     compio::runtime::RuntimeBuilder::new()
-        .with_proactor(build_proactor())
+        .with_proactor(build_proactor(args.sqpoll_idle))
         .build()
         .expect("failed to build init runtime")
         .block_on(async {
