@@ -1,5 +1,6 @@
 use std::io;
 use std::ops::Range;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use futures_util::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use prometheus::HistogramTimer;
 use rsmp::{AsyncStreamCompat, CallContext, Interceptor, ReqBody};
+use socket2::SockRef;
 use tracing::{debug, error, info, warn};
 
 use crate::cache::{DiskCache, MemoryCache};
@@ -394,6 +396,10 @@ pub async fn serve_shard(
             match $result {
                 Ok((stream, addr)) => {
                     debug!(shard_id, %addr, "Connection accepted");
+                    let sock_ref = unsafe { BorrowedFd::borrow_raw(stream.as_raw_fd()) };
+                    if let Err(e) = SockRef::from(&sock_ref).set_nodelay(true) {
+                        error!(shard_id, %addr, "Failed to set TCP_NODELAY: {e}");
+                    }
                     let handler = handler.clone();
                     let conn_shutdown_rx = conn_shutdown_rx.clone();
                     connections.push(spawn(async move {
