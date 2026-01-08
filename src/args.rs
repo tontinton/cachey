@@ -16,7 +16,7 @@ pub struct Args {
     pub listen: String,
 
     /// The provided value to listen() on the TCP server (man 2 listen).
-    #[clap(long, default_value = "1024")]
+    #[clap(long, default_value = "65536")]
     pub num_listeners: u32,
 
     /// Path to the disk cache dir.
