@@ -225,11 +225,15 @@ impl CacheHandler {
 
         debug!(shard_id = self.shard_id, id, ?path, "writing");
 
-        let mut file = File::create(&path).await?;
+        let mut file = File::create(&path).await.map_err(|e| {
+            error!(shard_id = self.shard_id, id, ?path, %e, "file create failed");
+            CacheError::from(e)
+        })?;
 
         let captures = match Self::stream_to_file(stream, &mut file, size, ranges).await {
             Ok(c) => c,
             Err(e) => {
+                error!(shard_id = self.shard_id, id, ?path, %e, "stream to file failed");
                 drop(file);
                 if let Err(remove_err) = remove_file(&path).await {
                     warn!(?path, %remove_err, "failed to remove partial file after stream error");
@@ -281,7 +285,10 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
                 id, offset, size, "memory cache hit"
             );
             let bytes_sent = data.len() as u64;
-            Self::stream_buffer(data, stream).await?;
+            Self::stream_buffer(data, stream).await.map_err(|e| {
+                error!(shard_id = self.shard_id, id, %e, "stream buffer failed");
+                e
+            })?;
             METRICS
                 .bytes_read_total
                 .with_label_values(&[Self::GET_NAME])
@@ -304,8 +311,16 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
             .acquire(STREAM_FILE_BUF_SIZE as u64)
             .await;
 
-        let file = File::open(&path).await?;
-        let bytes_sent = Self::stream_from_file(&file, stream, offset, size).await?;
+        let file = File::open(&path).await.map_err(|e| {
+            error!(shard_id = self.shard_id, id, ?path, %e, "file open failed");
+            CacheError::from(e)
+        })?;
+        let bytes_sent = Self::stream_from_file(&file, stream, offset, size)
+            .await
+            .map_err(|e| {
+                error!(shard_id = self.shard_id, id, ?path, %e, "stream from file failed");
+                CacheError::from(e)
+            })?;
 
         METRICS
             .bytes_read_total
@@ -330,7 +345,10 @@ impl CacheServiceHandlerLocal<TcpStreamCompat> for CacheHandler {
             return Err(CacheError::AlreadyExists(id.to_string()));
         }
 
-        let stream = body.start().await?;
+        let stream = body.start().await.map_err(|e| {
+            error!(shard_id = self.shard_id, id, %e, "body start failed");
+            CacheError::from(e)
+        })?;
         let result = self.put_inner(id, memory_cache_ranges, stream, size).await;
         self.disk_cache.finish_writing(id);
         result
